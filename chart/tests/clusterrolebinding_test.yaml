@@ -6,13 +6,14 @@ tests:
   - it: disable by default
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
 
   - it: enable by multi namespace mode
     set:
-      experimental:
-        multiNamespaceMode:
-          enabled: true
+      sync:
+        toHost:
+          namespaces:
+            enabled: true
     asserts:
       - hasDocuments:
           count: 1
@@ -23,19 +24,6 @@ tests:
         fromHost:
           ingressClasses:
             enabled: true
-    asserts:
-      - hasDocuments:
-          count: 1
-
-  - it: enable by generic sync
-    set:
-      experimental:
-        genericSync:
-          clusterRole:
-            extraRules:
-              - apiGroups: [""]
-                resources: ["test"]
-                verbs: ["test"]
     asserts:
       - hasDocuments:
           count: 1

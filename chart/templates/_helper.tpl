@@ -16,10 +16,13 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "vcluster.name" -}}
-{{- if regexMatch "^[0-9]+$" .Release.Name -}}
-{{- printf "vc-%s" .Release.Name -}}
+
+{{- define "vcluster.version.label" -}}
+{{- $rawLabel := printf "%s-%s" .Chart.Name .Chart.Version -}}
+{{- $sanitized := replace "+" "_" $rawLabel | replace "@" "_" -}}
+{{- if gt (len $sanitized) 63 -}}
+{{- $sanitized | trunc 63 -}}
 {{- else -}}
-{{- printf "%s" .Release.Name }}
+{{- $sanitized -}}
 {{- end -}}
 {{- end -}}

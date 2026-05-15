@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -33,18 +34,21 @@ import (
 
 const (
 	LoftDirectClusterEndpointCaData = "loft.sh/direct-cluster-endpoint-ca-data"
-	VersionPath                     = "%s/version"
-	LoginPath                       = "%s/login?cli=true"
-	RedirectPath                    = "%s/spaces"
-	AccessKeyPath                   = "%s/profile/access-keys"
-	ConfigFileName                  = "platform.json"
-	RefreshToken                    = time.Minute * 30
-	CacheFolder                     = ".vcluster"
+
+	VersionPath    = "%s/version"
+	LoginPath      = "%s/login?cli=true"
+	RedirectPath   = "%s/spaces"
+	AccessKeyPath  = "%s/profile/access-keys"
+	ConfigFileName = "platform.json"
+	RefreshToken   = time.Minute * 30
+	CacheFolder    = ".vcluster"
 )
 
 var (
 	Self     *managementv1.Self
 	selfOnce sync.Once
+
+	ErrInvalidAccessKey = errors.New("invalid access key")
 )
 
 type Client interface {
@@ -59,6 +63,7 @@ type Client interface {
 	VirtualCluster(cluster, namespace, virtualCluster string) (kube.Interface, error)
 
 	ManagementConfig() (*rest.Config, error)
+	RestConfig(hostSuffix string) (*rest.Config, error)
 
 	Config() *config.CLI
 	Save() error
@@ -110,7 +115,7 @@ type client struct {
 func (c *client) RefreshSelf(ctx context.Context) error {
 	managementClient, err := c.Management()
 	if err != nil {
-		return fmt.Errorf("create mangement client: %w", err)
+		return fmt.Errorf("create management client: %w", err)
 	}
 
 	c.self, err = managementClient.Loft().ManagementV1().Selves().Create(ctx, &managementv1.Self{}, metav1.CreateOptions{})
@@ -157,8 +162,12 @@ func (c *client) Save() error {
 	return c.config.Save()
 }
 
+func (c *client) Delete() error {
+	return c.config.ClearPlatform()
+}
+
 func (c *client) ManagementConfig() (*rest.Config, error) {
-	return c.restConfig("/kubernetes/management")
+	return c.RestConfig("/kubernetes/management")
 }
 
 func (c *client) Management() (kube.Interface, error) {
@@ -171,7 +180,7 @@ func (c *client) Management() (kube.Interface, error) {
 }
 
 func (c *client) SpaceInstanceConfig(project, name string) (*rest.Config, error) {
-	return c.restConfig("/kubernetes/project/" + project + "/space/" + name)
+	return c.RestConfig("/kubernetes/project/" + project + "/space/" + name)
 }
 
 func (c *client) SpaceInstance(project, name string) (kube.Interface, error) {
@@ -184,7 +193,7 @@ func (c *client) SpaceInstance(project, name string) (kube.Interface, error) {
 }
 
 func (c *client) VirtualClusterInstanceConfig(project, name string) (*rest.Config, error) {
-	return c.restConfig("/kubernetes/project/" + project + "/virtualcluster/" + name)
+	return c.RestConfig("/kubernetes/project/" + project + "/virtualcluster/" + name)
 }
 
 func (c *client) VirtualClusterInstance(project, name string) (kube.Interface, error) {
@@ -197,7 +206,7 @@ func (c *client) VirtualClusterInstance(project, name string) (kube.Interface, e
 }
 
 func (c *client) ClusterConfig(cluster string) (*rest.Config, error) {
-	return c.restConfig("/kubernetes/cluster/" + cluster)
+	return c.RestConfig("/kubernetes/cluster/" + cluster)
 }
 
 func (c *client) Cluster(cluster string) (kube.Interface, error) {
@@ -210,7 +219,7 @@ func (c *client) Cluster(cluster string) (kube.Interface, error) {
 }
 
 func (c *client) VirtualClusterConfig(cluster, namespace, virtualCluster string) (*rest.Config, error) {
-	return c.restConfig("/kubernetes/virtualcluster/" + cluster + "/" + namespace + "/" + virtualCluster)
+	return c.RestConfig("/kubernetes/virtualcluster/" + cluster + "/" + namespace + "/" + virtualCluster)
 }
 
 func (c *client) VirtualCluster(cluster, namespace, virtualCluster string) (kube.Interface, error) {
@@ -228,14 +237,14 @@ func (c *client) Config() *config.CLI {
 
 func verifyHost(host string) error {
 	if !strings.HasPrefix(host, "https") {
-		return fmt.Errorf("cannot log into a non https loft instance '%s', please make sure you have TLS enabled", host)
+		return fmt.Errorf(product.Replace("cannot log into a non https loft instance '%s', please make sure you have TLS enabled"), host)
 	}
 
 	return nil
 }
 
 func (c *client) Version() (*auth.Version, error) {
-	restConfig, err := c.restConfig("")
+	restConfig, err := c.RestConfig("")
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +320,7 @@ func (c *client) LoginWithAccessKey(host, accessKey string, insecure bool) error
 
 	platformConfig := c.Config().Platform
 	if platformConfig.Host == host && platformConfig.AccessKey == accessKey {
-		return nil
+		return c.mgmtLogin(host, accessKey, insecure)
 	}
 
 	// delete old access key if were logged in before
@@ -325,10 +334,27 @@ func (c *client) LoginWithAccessKey(host, accessKey string, insecure bool) error
 		}
 	}
 
-	platformConfig.Host = host
-	platformConfig.Insecure = insecure
-	platformConfig.AccessKey = accessKey
-	c.Config().Platform = platformConfig
+	// Try a secure login first, even if they specify --insecure
+	if lgnErr := c.mgmtLogin(host, accessKey, false); lgnErr != nil {
+		if !insecure {
+			return lgnErr
+		}
+
+		// If specified, try an insecure login and save to the platform config if successful
+		if lgnErr = c.mgmtLogin(host, accessKey, true); lgnErr != nil {
+			return lgnErr
+		}
+	}
+
+	c.Config().Platform.Insecure = insecure
+	return c.Save()
+}
+
+func (c *client) mgmtLogin(host, accessKey string, insecure bool) error {
+	cfg := c.Config()
+	cfg.Platform.Host = host
+	cfg.Platform.AccessKey = accessKey
+	cfg.Platform.Insecure = insecure
 
 	// verify the connection works
 	managementClient, err := c.Management()
@@ -341,23 +367,37 @@ func (c *client) LoginWithAccessKey(host, accessKey string, insecure bool) error
 	if err != nil {
 		var urlError *url.Error
 		if errors.As(err, &urlError) && urlError != nil {
-			var err x509.UnknownAuthorityError
-			if errors.As(urlError.Err, &err) {
-				return fmt.Errorf("unsafe login endpoint '%s', if you wish to login into an insecure loft endpoint run with the '--insecure' flag", c.config.Platform.Host)
+			var certErr *tls.CertificateVerificationError
+			if errors.As(urlError.Err, &certErr) {
+				return fmt.Errorf("%w: You may need to login again via `%s login %s --insecure` to allow self-signed certificates", certErr, os.Args[0], host)
+			}
+
+			// Note: CertificateVerificationError can wrap UnknownAuthorityError, so this check must come after.
+			var unknownAuthErr x509.UnknownAuthorityError
+			if errors.As(urlError.Err, &unknownAuthErr) {
+				if !strings.HasPrefix(host, "https") {
+					return fmt.Errorf(product.Replace("cannot log into a non https loft instance '%s', please make sure you have TLS enabled"), host)
+				}
+				return fmt.Errorf(product.Replace("cannot verify TLS certificate for '%s' because it is signed by an unknown authority. If you are using a self-signed certificate, login again via `%s login %s --insecure`"), host, os.Args[0], host)
 			}
 		}
 
-		return perrors.Errorf("error logging in: %v", err)
+		return fmt.Errorf("%w: %w", err, ErrInvalidAccessKey)
 	}
 
-	return c.Save()
+	return nil
 }
 
-func (c *client) restConfig(hostSuffix string) (*rest.Config, error) {
+func (c *client) RestConfig(hostSuffix string) (*rest.Config, error) {
 	if c.config == nil {
 		return nil, perrors.New("no config loaded")
 	} else if c.config.Platform.Host == "" || c.config.Platform.AccessKey == "" {
-		return nil, perrors.New(fmt.Sprintf("not logged in, please make sure you have run '%s' to create one or '%s [%s]' if one already exists", product.StartCmd(), product.LoginCmd(), product.Url()))
+		return nil, perrors.New(fmt.Sprintf(
+			"not logged in – run '%s' to create a client, or if one already exists, log in with '%s [%s]' or '%s --access-key <key>'",
+			product.StartCmd(),
+			product.LoginCmd(), product.Url(),
+			product.LoginCmd(),
+		))
 	}
 
 	// build a rest config

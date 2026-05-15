@@ -19,11 +19,20 @@ import (
 func (s *podSyncer) isPodSecurityStandardsValid(ctx context.Context, pod *corev1.Pod, log loghelper.Logger) (bool, error) {
 	result, err := s.validatePodSecurityStandards(ctx, pod)
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Errorf("%v", err)
 	} else if result != nil {
 		if !result.Allowed {
 			log.Errorf("%s pod creation not allowed: %s", pod.Name, result.Result.Message)
-			s.EventRecorder().Eventf(pod, "Warning", "SyncError", `Pod %s is forbidden: %s`, pod.Name, result.Result.Message)
+			s.EventRecorder().Eventf(
+				pod,
+				nil,
+				"Warning",
+				"SyncError",
+				fmt.Sprintf("Sync%s", pod.GetObjectKind().GroupVersionKind().Kind),
+				`Pod %s is forbidden: %s`,
+				pod.Name,
+				result.Result.Message,
+			)
 		}
 		return result.Allowed, nil
 	}
@@ -41,7 +50,7 @@ func (s *podSyncer) validatePodSecurityStandards(ctx context.Context, pod *corev
 		WarnVersion:    version.String(),
 	}
 
-	evaluator, err := policy.NewEvaluator(policy.DefaultChecks())
+	evaluator, err := policy.NewEvaluator(policy.DefaultChecks(), &version)
 	if err != nil {
 		return nil, fmt.Errorf("could not create PodSecurityRegistry: %w", err)
 	}

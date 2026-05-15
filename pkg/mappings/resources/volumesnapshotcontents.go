@@ -3,7 +3,7 @@ package resources
 import (
 	_ "embed"
 
-	volumesnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	volumesnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/mappings/generic"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
@@ -17,7 +17,7 @@ import (
 var volumeSnapshotContentsCRD string
 
 func CreateVolumeSnapshotContentsMapper(ctx *synccontext.RegisterContext) (synccontext.Mapper, error) {
-	if !ctx.Config.Sync.ToHost.VolumeSnapshots.Enabled {
+	if !ctx.Config.Sync.ToHost.VolumeSnapshotContents.Enabled {
 		return generic.NewMirrorMapper(&volumesnapshotv1.VolumeSnapshotContent{})
 	}
 

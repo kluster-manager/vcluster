@@ -32,17 +32,17 @@ There are a number of areas where contributions can be accepted:
 
 We recommend developing vCluster directly on a local Kubernetes cluster as it provides faster feedback. There are two ways that we recommend developing.
 
-* DevSpace
-* Locally
+- DevSpace
+- Locally
 
 ## Pre-requisites for Development
 
 ### Tools
 
-* Docker needs to be installed (e.g. docker-desktop, orbstack, rancher desktop etc.)
-* [kubectl](https://kubernetes.io/docs/tasks/tools/)
-* [Helm v3.10.0+](https://helm.sh/docs/intro/install/)
-* Local Kubernetes v1.26+ cluster (i.e. Docker Desktop, [minikube](https://minikube.sigs.k8s.io/docs/start/), KinD or similar)
+- Docker needs to be installed (e.g. docker-desktop, orbstack, rancher desktop etc.)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [Helm v3.10.0+](https://helm.sh/docs/intro/install/)
+- Local Kubernetes v1.26+ cluster (i.e. Docker Desktop, [minikube](https://minikube.sigs.k8s.io/docs/start/), KinD, [vind](https://www.vcluster.com/docs/vcluster/deploy/topologies/extracting-the-docker-driver) or similar)
 
 ### Fork and Clone the vcluster repo
 
@@ -62,20 +62,20 @@ The vCluster repo is enabled to develop using [DevSpace](https://www.devspace.sh
 
 ### Install DevSpace
 
-Follow the guide on how to install [DevSpace](https://github.com/loft-sh/devspace#1-install-devspace)
+Follow the guide on how to install [DevSpace](https://github.com/devspace-sh/devspace#quickstart)
 
 ### Launch DevSpace
 
 Ensure your `kubectl` is connected to the local Kubernetes cluster.
 
 ```
-$ kubectl get namespaces
+kubectl get namespaces
 ```
 
 In your Github `vcluster` directory, run:
 
 ```
-$ devspace dev
+devspace dev
 ```
 
 Which uses the `devspace.yaml` file in the `vcluster` directory to deploy a vCluster and launch DevSpace:
@@ -155,7 +155,6 @@ vcluster-0:vcluster-dev$ go run -mod vendor cmd/vcluster/main.go start
 
 Now, you can start to work with the virtual cluster based on the source code. This vCluster is running on your local Kubernetes cluster.
 
-
 If you change a file locally, DevSpace will automatically sync the file into the Devspace container. After any changes, re-run the same command in the DevSpace terminal to apply the changes.
 
 #### Start vcluster in DevSpace in debug mode via `dlv`
@@ -165,7 +164,7 @@ You can either debug with Delve within DevSpace or locally. Devspace is more con
 Run vCluster in the debug mode with Delve in the `vcluster` directory. Note: Other sessions of DevSpace will need to be terminated before starting another
 
 ```
-$ devspace dev -n vcluster
+devspace dev -n vcluster
 ```
 
 Once DevSpace launches and you are in the `vcluster` pod, run the following delve command.
@@ -190,7 +189,7 @@ Download the [vCluster CLI](https://www.vcluster.com/docs/get-started/) and use 
 By connecting to the vCluster using the CLI, you set your local KubeConfig to the virtual cluster
 
 ```
-$ vcluster connect vcluster
+vcluster connect vcluster
 ```
 
 ## Build and Test the vcluster CLI tool
@@ -198,7 +197,7 @@ $ vcluster connect vcluster
 Build the CLI tool
 
 ```
-$ go generate ./... && go build -o vcluster cmd/vclusterctl/main.go # build vcluster cli
+go generate ./... && go build -o vcluster cmd/vclusterctl/main.go # build vcluster cli
 ```
 
 Test the built CLI tool
@@ -208,12 +207,13 @@ Test the built CLI tool
 ```
 
 ## Developing without DevSpace
+
 ### Pre-requisites
 
-* [Golang v1.22](https://go.dev/doc/install)
-* [Goreleaser](https://goreleaser.com/install/)
-* [Just](https://github.com/casey/just)
-* [Kind](https://kind.sigs.k8s.io/)
+- [Golang v1.25](https://go.dev/doc/install)
+- [Goreleaser](https://goreleaser.com/install/)
+- [Just](https://github.com/casey/just)
+- [Kind](https://kind.sigs.k8s.io/) or [vind](https://www.vcluster.com/docs/vcluster/deploy/topologies/extracting-the-docker-driver) (recommended — vCluster Docker driver)
 
 ### Uninstall vCluster CLI
 
@@ -266,6 +266,22 @@ You can now use your cluster with:
 kubectl cluster-info --context kind-kind
 
 ```
+
+### Alternative: Bring up a local K8s cluster using vind
+
+[vind](https://www.vcluster.com/docs/vcluster/deploy/topologies/extracting-the-docker-driver) (the vCluster Docker driver) provides a simpler local development experience. No explicit image loading is needed — container images are available natively.
+
+```
+vcluster use driver docker
+vcluster create my-cluster
+```
+
+Your kubeconfig is automatically updated. Verify with:
+
+```
+kubectl get namespaces
+```
+
 ### Build vCluster Container Image
 
 ```
@@ -279,8 +295,10 @@ Note: Feel free to push this image into your own registry.
 If using kind as your local Kubernetes cluster, you need to import the image into kind.
 
 ```
-$ kind load docker-image my-vcluster:0.0.1
+kind load docker-image my-vcluster:0.0.1
 ```
+
+> **Note for vind users:** This step is not needed. vind shares the Docker daemon with the host, so locally built images are available immediately.
 
 ### Create vCluster with self-compiled vCluster CLI
 
@@ -305,7 +323,7 @@ controlPlane:
 Launch your vCluster using your `vcluster.yaml`
 
 ```
-$ ./dist/<ARCH>/vcluster create my-vcluster -n my-vcluster -f ./vcluster.yaml --local-chart-dir chart
+./dist/<ARCH>/vcluster create my-vcluster -n my-vcluster -f ./vcluster.yaml --local-chart-dir chart
 ```
 
 ### Access your vCluster and Set your local KubeConfig
@@ -313,7 +331,7 @@ $ ./dist/<ARCH>/vcluster create my-vcluster -n my-vcluster -f ./vcluster.yaml --
 By connecting to the vCluster using the CLI, you set your local KubeConfig to the virtual cluster
 
 ```
-$ ./dist/<ARCH>/vcluster connect my-vcluster
+./dist/<ARCH>/vcluster connect my-vcluster
 ```
 
 # Running vCluster Tests
@@ -325,7 +343,7 @@ All of the tests are located in the vcluster directory.
 Run the entire unit test suite.
 
 ```
-$ ./hack/test.sh
+./hack/test.sh
 ```
 
 ## Running the e2e Test Suite
@@ -333,17 +351,18 @@ $ ./hack/test.sh
 Run the e2e tests, that are located in the e2e folder.
 
 ```
-$ just delete-kind
-$ just e2e
-
+just delete-kind
+just e2e
 ```
+
+> Note: The e2e test suite currently uses Kind. If you use vind for local development,
+> you can still run unit tests with `./hack/test.sh`.
 
 If [Ginkgo](https://github.com/onsi/ginkgo#global-installation) is already installed, run  `ginkgo -v`.
 
 ## Run the Conformance Tests
 
 For running conformance tests, please take a look at [conformance tests](https://github.com/loft-sh/tree/vcluster/main/conformance/v1.21)
-
 
 # License
 
@@ -352,4 +371,3 @@ This project is licensed under the Apache 2.0 License.
 # Copyright notice
 
 It is important to state that you retain copyright for your contributions, but agree to license them for usage by the project and author(s) under the Apache 2.0 license. Git retains history of authorship, but we use a catch-all statement rather than individual names.
-

@@ -101,13 +101,13 @@ func (cmd *NamespaceCmd) connectSpace(ctx context.Context, platformClient platfo
 	}
 
 	// wait until space is ready
-	spaceInstance, err := platform.WaitForSpaceInstance(ctx, managementClient, projectutil.ProjectNamespace(cmd.Project), spaceName, !cmd.SkipWait, cmd.log)
+	spaceInstance, err := platform.WaitForSpaceInstance(ctx, managementClient, projectutil.ProjectNamespace(cmd.Project), spaceName, !cmd.SkipWait, false, cmd.log)
 	if err != nil {
 		return err
 	}
 
 	// create kube context options
-	contextOptions, err := platform.CreateSpaceInstanceOptions(ctx, platformClient, cmd.Config, cmd.Project, spaceInstance, true)
+	contextOptions, err := platform.CreateSpaceInstanceOptions(ctx, platformClient, cmd.Config, cmd.Project, spaceInstance, true, cmd.DisableDirectClusterEndpoint)
 	if err != nil {
 		return err
 	}

@@ -4,12 +4,12 @@ project_name: vcluster
 
 before:
   hooks:
-    - go mod tidy
-    - just embed-chart {{ .Version }}
-    - just clean-release
-    - just copy-assets
-    - just generate-vcluster-images {{ .Version }}
-    - just generate-matrix-specific-images {{ .Version }}
+    - '{{ if not .IsSnapshot }}just embed-chart {{ .Version }}{{ else }}echo "Skipping embed-chart"{{ end }}'
+    - '{{ if not .IsSnapshot }}just clean-release{{ else }}echo "Skipping clean-release"{{ end }}'
+    - '{{ if not .IsSnapshot }}just copy-assets{{ else }}echo "Skipping copy-assets"{{ end }}'
+    - '{{ if not .IsSnapshot }}just generate-vcluster-latest-images {{ .Version }}{{ else }}echo "Skipping generate-vcluster-latest-images"{{ end }}'
+    - '{{ if not .IsSnapshot }}just generate-vcluster-optional-images {{ .Version }}{{ else }}echo "Skipping generate-vcluster-optional-images"{{ end }}'
+    - '{{ if not .IsSnapshot }}just generate-matrix-specific-images {{ .Version }}{{ else }}echo "Skipping generate-matrix-specific-images"{{ end }}'
 
 source:
   format: tar.gz
@@ -36,7 +36,7 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/loft-sh/vcluster/pkg/telemetry.SyncerVersion={{.Version}}
-      - -X github.com/loft-sh/vcluster/pkg/telemetry.telemetryPrivateKey={{.Env.TELEMETRY_PRIVATE_KEY}}
+      - -X github.com/loft-sh/vcluster/pkg/telemetry.telemetryPrivateKey={{ with index .Env "TELEMETRY_PRIVATE_KEY" }}{{ . }}{{ end }}
 
   - id: vcluster-cli
     env:
@@ -49,14 +49,7 @@ builds:
     goarch:
       - amd64
       - arm64
-      - arm
-    goarm:
-      - "6"
     ignore:
-      - goos: darwin
-        goarch: arm
-      - goos: windows
-        goarch: arm
       - goos: windows
         goarch: arm64
     binary: vcluster
@@ -72,7 +65,7 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
       - -X github.com/loft-sh/vcluster/pkg/telemetry.SyncerVersion={{.Version}}
-      - -X github.com/loft-sh/vcluster/pkg/telemetry.telemetryPrivateKey={{.Env.TELEMETRY_PRIVATE_KEY}}
+      - -X github.com/loft-sh/vcluster/pkg/telemetry.telemetryPrivateKey={{ with index .Env "TELEMETRY_PRIVATE_KEY" }}{{ . }}{{ end }}
 
 archives:
   - id: vcluster_cli_archives
@@ -118,7 +111,7 @@ signs:
     artifacts: checksum
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   use: github
@@ -185,18 +178,10 @@ brews:
 dockers:
   # --- Vcluster images ---
   - image_templates:
-      - ghcr.io/loft-sh/vcluster:{{ .Version }}-amd64
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:latest-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:{{ .Major }}-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:{{ .Major }}.{{ .Minor }}-amd64{{ end }}'
       - ghcr.io/loft-sh/vcluster-oss:{{ .Version }}-amd64
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:latest-amd64{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:{{ .Major }}-amd64{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:{{ .Major }}.{{ .Minor }}-amd64{{ end }}'
-      - loftsh/vcluster:{{ .Version }}-amd64
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:latest-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:{{ .Major }}-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:{{ .Major }}.{{ .Minor }}-amd64{{ end }}'
     use: buildx
     dockerfile: Dockerfile.release
     ids:
@@ -210,18 +195,10 @@ dockers:
       - "--label=org.opencontainers.image.version={{.Version}}"
 
   - image_templates:
-      - ghcr.io/loft-sh/vcluster:{{ .Version }}-arm64v8
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:latest-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:{{ .Major }}-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster:{{ .Major }}.{{ .Minor }}-arm64v8{{ end }}'
       - ghcr.io/loft-sh/vcluster-oss:{{ .Version }}-arm64v8
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:latest-arm64v8{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:{{ .Major }}-arm64v8{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-oss:{{ .Major }}.{{ .Minor }}-arm64v8{{ end }}'
-      - loftsh/vcluster:{{ .Version }}-arm64v8
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:latest-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:{{ .Major }}-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster:{{ .Major }}.{{ .Minor }}-arm64v8{{ end }}'
     use: buildx
     goarch: arm64
     dockerfile: Dockerfile.release
@@ -241,10 +218,6 @@ dockers:
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:latest-amd64{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:{{ .Major }}-amd64{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:{{ .Major }}.{{ .Minor }}-amd64{{ end }}'
-      - loftsh/vcluster-cli:{{ .Version }}-amd64
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:latest-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:{{ .Major }}-amd64{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:{{ .Major }}.{{ .Minor }}-amd64{{ end }}'
     use: buildx
     dockerfile: Dockerfile.cli.release
     ids:
@@ -262,10 +235,6 @@ dockers:
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:latest-arm64v8{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:{{ .Major }}-arm64v8{{ end }}'
       - '{{ if eq .Prerelease "" }}ghcr.io/loft-sh/vcluster-cli:{{ .Major }}.{{ .Minor }}-arm64v8{{ end }}'
-      - loftsh/vcluster-cli:{{ .Version }}-arm64v8
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:latest-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:{{ .Major }}-arm64v8{{ end }}'
-      - '{{ if eq .Prerelease "" }}loftsh/vcluster-cli:{{ .Major }}.{{ .Minor }}-arm64v8{{ end }}'
     use: buildx
     goarch: arm64
     dockerfile: Dockerfile.cli.release
@@ -304,52 +273,6 @@ docker_manifests:
       - ghcr.io/loft-sh/vcluster-oss:{{ .Major }}.{{ .Minor }}-arm64v8
     skip_push: auto
 
-  - name_template: ghcr.io/loft-sh/vcluster:{{ .Version }}
-    image_templates:
-      - ghcr.io/loft-sh/vcluster:{{ .Version }}-amd64
-      - ghcr.io/loft-sh/vcluster:{{ .Version }}-arm64v8
-
-  - name_template: ghcr.io/loft-sh/vcluster:latest
-    image_templates:
-      - ghcr.io/loft-sh/vcluster:latest-amd64
-      - ghcr.io/loft-sh/vcluster:latest-arm64v8
-    skip_push: auto
-
-  - name_template: ghcr.io/loft-sh/vcluster:{{ .Major }}
-    image_templates:
-      - ghcr.io/loft-sh/vcluster:{{ .Major }}-amd64
-      - ghcr.io/loft-sh/vcluster:{{ .Major }}-arm64v8
-    skip_push: auto
-
-  - name_template: ghcr.io/loft-sh/vcluster:{{ .Major }}.{{ .Minor }}
-    image_templates:
-      - ghcr.io/loft-sh/vcluster:{{ .Major }}.{{ .Minor }}-amd64
-      - ghcr.io/loft-sh/vcluster:{{ .Major }}.{{ .Minor }}-arm64v8
-    skip_push: auto
-
-  - name_template: loftsh/vcluster:{{ .Version }}
-    image_templates:
-      - loftsh/vcluster:{{ .Version }}-amd64
-      - loftsh/vcluster:{{ .Version }}-arm64v8
-
-  - name_template: loftsh/vcluster:latest
-    image_templates:
-      - loftsh/vcluster:latest-amd64
-      - loftsh/vcluster:latest-arm64v8
-    skip_push: auto
-
-  - name_template: loftsh/vcluster:{{ .Major }}
-    image_templates:
-      - loftsh/vcluster:{{ .Major }}-amd64
-      - loftsh/vcluster:{{ .Major }}-arm64v8
-    skip_push: auto
-
-  - name_template: loftsh/vcluster:{{ .Major }}.{{ .Minor }}
-    image_templates:
-      - loftsh/vcluster:{{ .Major }}.{{ .Minor }}-amd64
-      - loftsh/vcluster:{{ .Major }}.{{ .Minor }}-arm64v8
-    skip_push: auto
-
   # --- Vcluster-cli multi arch ---
   - name_template: ghcr.io/loft-sh/vcluster-cli:{{ .Version }}
     image_templates:
@@ -374,27 +297,10 @@ docker_manifests:
       - ghcr.io/loft-sh/vcluster-cli:{{ .Major }}.{{ .Minor }}-arm64v8
     skip_push: auto
 
-  - name_template: loftsh/vcluster-cli:{{ .Version }}
-    image_templates:
-      - loftsh/vcluster-cli:{{ .Version }}-amd64
-      - loftsh/vcluster-cli:{{ .Version }}-arm64v8
-
-  - name_template: loftsh/vcluster-cli:latest
-    image_templates:
-      - loftsh/vcluster-cli:latest-amd64
-      - loftsh/vcluster-cli:latest-arm64v8
-    skip_push: auto
-
   - name_template: loftsh/vcluster-cli:{{ .Major }}
     image_templates:
       - loftsh/vcluster-cli:{{ .Major }}-amd64
       - loftsh/vcluster-cli:{{ .Major }}-arm64v8
-    skip_push: auto
-
-  - name_template: loftsh/vcluster-cli:{{ .Major }}.{{ .Minor }}
-    image_templates:
-      - loftsh/vcluster-cli:{{ .Major }}.{{ .Minor }}-amd64
-      - loftsh/vcluster-cli:{{ .Major }}.{{ .Minor }}-arm64v8
     skip_push: auto
 
 docker_signs:

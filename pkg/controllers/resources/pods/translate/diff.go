@@ -2,28 +2,51 @@ package translate
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
+	"github.com/loft-sh/vcluster/pkg/mappings"
+	"github.com/loft-sh/vcluster/pkg/patcher"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (t *translator) Diff(ctx *synccontext.SyncContext, event *synccontext.SyncEvent[*corev1.Pod]) error {
 	// sync conditions
-	event.TargetObject().Status.Conditions = event.SourceObject().Status.Conditions
+	event.Virtual.Status.Conditions, event.Host.Status.Conditions = patcher.CopyBidirectional(
+		event.VirtualOld.Status.Conditions,
+		event.Virtual.Status.Conditions,
+		event.HostOld.Status.Conditions,
+		event.Host.Status.Conditions,
+	)
 
 	// has status changed?
 	vPod := event.Virtual
 	pPod := event.Host
+
+	// We have to reset the QOSClass to the original value, otherwise we might get an error
+	// that the field is immutable
+	originalQOSClass := vPod.Status.QOSClass
 	vPod.Status = *pPod.Status.DeepCopy()
+	vPod.Status.QOSClass = originalQOSClass
+	err := t.convertResourceClaimStatuses(ctx, vPod, pPod.GetNamespace())
+	if err != nil {
+		return err
+	}
+
 	stripInjectedSidecarContainers(vPod, pPod)
 
 	// get Namespace resource in order to have access to its labels
 	vNamespace := &corev1.Namespace{}
-	err := t.vClient.Get(ctx, client.ObjectKey{Name: vPod.ObjectMeta.GetNamespace()}, vNamespace)
+	err = t.vClient.Get(ctx, client.ObjectKey{Name: vPod.GetNamespace()}, vNamespace)
 	if err != nil {
 		return err
 	}
@@ -31,43 +54,52 @@ func (t *translator) Diff(ctx *synccontext.SyncContext, event *synccontext.SyncE
 	// spec diff
 	t.calcSpecDiff(pPod, vPod)
 
-	// check pod and namespace labels
-	if event.Source == synccontext.SyncEventSourceHost {
-		vPod.Labels = translate.VirtualLabels(pPod, vPod)
-	} else {
-		updatedLabels := translate.HostLabels(vPod, pPod)
-		if updatedLabels == nil {
-			updatedLabels = map[string]string{}
+	// bi-directionally sync labels & annotations
+	event.Virtual.Annotations, event.Host.Annotations = translate.AnnotationsBidirectionalUpdate(
+		event,
+		GetExcludedAnnotations(pPod)...,
+	)
+
+	// exclude namespace labels
+	excludeLabelsFn := func(key string, value interface{}) (string, interface{}) {
+		if strings.HasPrefix(key, translate.NamespaceLabelPrefix) {
+			return "", nil
 		}
-		for k, v := range vNamespace.GetLabels() {
-			updatedLabels[translate.HostLabelNamespace(k)] = v
+
+		return key, value
+	}
+	event.Virtual.Labels, event.Host.Labels = translate.LabelsBidirectionalUpdateFunction(
+		event,
+		excludeLabelsFn,
+		excludeLabelsFn,
+	)
+
+	// update namespace labels
+	for key := range event.Host.Labels {
+		if strings.HasPrefix(key, translate.NamespaceLabelPrefix) {
+			delete(event.Host.Labels, key)
 		}
-		pPod.Labels = updatedLabels
+	}
+	for k, v := range vNamespace.GetLabels() {
+		event.Host.Labels[translate.HostLabelNamespace(k)] = v
 	}
 
-	// check annotations
-	updatedAnnotations := translate.HostAnnotations(vPod, pPod, GetExcludedAnnotations(pPod)...)
-	if updatedAnnotations == nil {
-		updatedAnnotations = map[string]string{}
-	}
-
-	// set owner references
-	updatedAnnotations[VClusterLabelsAnnotation] = LabelsAnnotation(vPod)
+	// update pod annotations
+	event.Host.Annotations[VClusterLabelsAnnotation] = LabelsAnnotation(vPod)
 	if len(vPod.OwnerReferences) > 0 {
 		ownerReferencesData, _ := json.Marshal(vPod.OwnerReferences)
-		updatedAnnotations[OwnerReferences] = string(ownerReferencesData)
+		event.Host.Annotations[OwnerReferences] = string(ownerReferencesData)
 		for _, ownerReference := range vPod.OwnerReferences {
 			if ownerReference.APIVersion == appsv1.SchemeGroupVersion.String() && canAnnotateOwnerSetKind(ownerReference.Kind) {
-				updatedAnnotations[OwnerSetKind] = ownerReference.Kind
+				event.Host.Annotations[OwnerSetKind] = ownerReference.Kind
 				break
 			}
 		}
 	} else {
-		delete(updatedAnnotations, OwnerReferences)
-		delete(updatedAnnotations, OwnerSetKind)
+		delete(event.Host.Annotations, OwnerReferences)
+		delete(event.Host.Annotations, OwnerSetKind)
 	}
 
-	pPod.Annotations = updatedAnnotations
 	return nil
 }
 
@@ -102,6 +134,7 @@ func GetExcludedAnnotations(pPod *corev1.Pod) []string {
 // - spec.containers[*].image
 // - spec.initContainers[*].image
 // - spec.activeDeadlineSeconds
+// - spec.tolerations (can be added not removed)
 //
 // TODO: check for ephemereal containers
 func (t *translator) calcSpecDiff(pObj, vObj *corev1.Pod) {
@@ -128,6 +161,23 @@ func (t *translator) calcSpecDiff(pObj, vObj *corev1.Pod) {
 	}
 
 	pObj.Spec.SchedulingGates = vObj.Spec.SchedulingGates
+
+	newTolerations := append([]corev1.Toleration{}, vObj.Spec.Tolerations...)
+	for _, hostTol := range pObj.Spec.Tolerations {
+		// Carry forward host-only tolerations.
+		// If there is a similar tolerations with an different TolerationsSeconds we add the duplicates
+		// and let kubernetes decide the one to use.
+		if !hasToleration(newTolerations, hostTol) {
+			newTolerations = append(newTolerations, hostTol)
+		}
+	}
+	// We add the enforcedTolerations if they are not already present
+	for _, toleration := range t.enforcedTolerations {
+		if !hasToleration(newTolerations, toleration) {
+			newTolerations = append(newTolerations, toleration)
+		}
+	}
+	pObj.Spec.Tolerations = newTolerations
 }
 
 func calcContainerImageDiff(pContainers, vContainers []corev1.Container, translateImages ImageTranslator, skipContainers map[string]bool) []corev1.Container {
@@ -186,4 +236,48 @@ func stripInjectedSidecarContainers(vPod, pPod *corev1.Pod) {
 			vPod.Status.ContainerStatuses = append(vPod.Status.ContainerStatuses, containerStatus)
 		}
 	}
+}
+
+func (t *translator) convertResourceClaimStatuses(ctx *synccontext.SyncContext, vPod *corev1.Pod, pNamespace string) error {
+	if vPod == nil || !t.resourceClaimEnabled {
+		return nil
+	}
+	for i := range vPod.Status.ResourceClaimStatuses {
+		if vPod.Status.ResourceClaimStatuses[i].ResourceClaimName == nil {
+			continue
+		}
+		name := *vPod.Status.ResourceClaimStatuses[i].ResourceClaimName
+		nsn := types.NamespacedName{
+			Namespace: pNamespace,
+			Name:      name,
+		}
+		resourceClaim := resourcev1.ResourceClaim{}
+		err := ctx.HostClient.Get(ctx.Context, nsn, &resourceClaim)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("can't convert pod resource resourceClaimStatuses to virtual: %w", err)
+		}
+		translateNsn := mappings.HostToVirtual(
+			ctx,
+			name,
+			resourceClaim.GetNamespace(),
+			&resourceClaim,
+			mappings.ResourceClaims())
+		if translateNsn.Name != "" {
+			vPod.Status.ResourceClaimStatuses[i].ResourceClaimName = ptr.To(translateNsn.Name)
+		}
+	}
+	return nil
+}
+
+// hasToleration reports whether tol is already present in the slice (full equality).
+func hasToleration(tolerations []corev1.Toleration, tol corev1.Toleration) bool {
+	for _, t := range tolerations {
+		if apiequality.Semantic.DeepEqual(t, tol) {
+			return true
+		}
+	}
+	return false
 }

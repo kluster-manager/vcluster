@@ -22,18 +22,22 @@ import (
 	"sync/atomic"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	endpointmetrics "k8s.io/apiserver/pkg/endpoints/metrics"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	genericfeatures "k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	utilflowcontrol "k8s.io/apiserver/pkg/util/flowcontrol"
 	apiserverproxyutil "k8s.io/apiserver/pkg/util/proxy"
 	"k8s.io/apiserver/pkg/util/x509metrics"
 	"k8s.io/client-go/transport"
+	"k8s.io/component-base/tracing"
 	"k8s.io/klog/v2"
 	apiregistrationv1api "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	apiregistrationv1apihelper "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1/helper"
+	"k8s.io/kube-aggregator/pkg/controllers/status/remote"
+	"k8s.io/streaming/pkg/httpstream"
 )
 
 const (
@@ -59,6 +63,9 @@ type proxyHandler struct {
 
 	// reject to forward redirect response
 	rejectForwardingRedirects bool
+
+	// tracerProvider is used to wrap the proxy transport and handler with tracing
+	tracerProvider tracing.TracerProvider
 }
 
 type proxyHandlingInfo struct {
@@ -153,13 +160,23 @@ func (r *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	proxyRoundTripper := handlingInfo.proxyRoundTripper
 	upgrade := httpstream.IsUpgradeRequest(req)
 
-	proxyRoundTripper = transport.NewAuthProxyRoundTripper(user.GetName(), user.GetGroups(), user.GetExtra(), proxyRoundTripper)
+	var userUID string
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.RemoteRequestHeaderUID) {
+		userUID = user.GetUID()
+	}
+
+	proxyRoundTripper = transport.NewAuthProxyRoundTripper(user.GetName(), userUID, user.GetGroups(), user.GetExtra(), proxyRoundTripper)
+
+	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerTracing) && !upgrade {
+		tracingWrapper := tracing.WrapperFor(r.tracerProvider)
+		proxyRoundTripper = tracingWrapper(proxyRoundTripper)
+	}
 
 	// If we are upgrading, then the upgrade path tries to use this request with the TLS config we provide, but it does
 	// NOT use the proxyRoundTripper.  It's a direct dial that bypasses the proxyRoundTripper.  This means that we have to
 	// attach the "correct" user headers to the request ahead of time.
 	if upgrade {
-		transport.SetAuthProxyHeaders(newReq, user.GetName(), user.GetGroups(), user.GetExtra())
+		transport.SetAuthProxyHeaders(newReq, user.GetName(), userUID, user.GetGroups(), user.GetExtra())
 	}
 
 	handler := proxy.NewUpgradeAwareHandler(location, proxyRoundTripper, true, upgrade, &responder{w: w})
@@ -203,16 +220,7 @@ func (r *proxyHandler) updateAPIService(apiService *apiregistrationv1api.APIServ
 
 	proxyClientCert, proxyClientKey := r.proxyCurrentCertKeyContent()
 
-	transportConfig := &transport.Config{
-		TLS: transport.TLSConfig{
-			Insecure:   apiService.Spec.InsecureSkipTLSVerify,
-			ServerName: apiService.Spec.Service.Name + "." + apiService.Spec.Service.Namespace + ".svc",
-			CertData:   proxyClientCert,
-			KeyData:    proxyClientKey,
-			CAData:     apiService.Spec.CABundle,
-		},
-		DialHolder: r.proxyTransportDial,
-	}
+	transportConfig := remote.BuildTransportConfig(r.proxyTransportDial, proxyClientCert, proxyClientKey, apiService)
 	transportConfig.Wrap(x509metrics.NewDeprecatedCertificateRoundTripperWrapperConstructor(
 		x509MissingSANCounter,
 		x509InsecureSHA1Counter,

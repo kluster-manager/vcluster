@@ -13,6 +13,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1 "k8s.io/api/core/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -36,15 +37,23 @@ type serviceAccountSyncer struct {
 	syncertypes.Importer
 }
 
+var _ syncertypes.OptionsProvider = &serviceAccountSyncer{}
+
+func (s *serviceAccountSyncer) Options() *syncertypes.Options {
+	return &syncertypes.Options{
+		ObjectCaching: true,
+	}
+}
+
 var _ syncertypes.Syncer = &serviceAccountSyncer{}
 
 func (s *serviceAccountSyncer) Syncer() syncertypes.Sync[client.Object] {
-	return syncer.ToGenericSyncer[*corev1.ServiceAccount](s)
+	return syncer.ToGenericSyncer(s)
 }
 
 func (s *serviceAccountSyncer) SyncToHost(ctx *synccontext.SyncContext, event *synccontext.SyncToHostEvent[*corev1.ServiceAccount]) (ctrl.Result, error) {
-	if event.IsDelete() || event.Virtual.DeletionTimestamp != nil {
-		return syncer.DeleteVirtualObject(ctx, event.Virtual, "host object was deleted")
+	if event.HostOld != nil || event.Virtual.DeletionTimestamp != nil {
+		return patcher.DeleteVirtualObject(ctx, event.Virtual, event.HostOld, "host object was deleted")
 	}
 
 	pObj := translate.HostMetadata(event.Virtual, s.VirtualToHost(ctx, types.NamespacedName{Name: event.Virtual.Name, Namespace: event.Virtual.Namespace}, event.Virtual))
@@ -53,11 +62,17 @@ func (s *serviceAccountSyncer) SyncToHost(ctx *synccontext.SyncContext, event *s
 	pObj.Secrets = nil
 	pObj.AutomountServiceAccountToken = &[]bool{false}[0]
 	pObj.ImagePullSecrets = nil
-	return syncer.CreateHostObject(ctx, event.Virtual, pObj, s.EventRecorder())
+
+	err := pro.ApplyPatchesHostObject(ctx, nil, pObj, event.Virtual, ctx.Config.Sync.ToHost.ServiceAccounts.Patches, false)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply patches: %w", err)
+	}
+
+	return patcher.CreateHostObject(ctx, event.Virtual, pObj, s.EventRecorder(), false)
 }
 
 func (s *serviceAccountSyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncEvent[*corev1.ServiceAccount]) (_ ctrl.Result, retErr error) {
-	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual)
+	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual, patcher.TranslatePatches(ctx.Config.Sync.ToHost.ServiceAccounts.Patches, false))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("new syncer patcher: %w", err)
 	}
@@ -66,26 +81,36 @@ func (s *serviceAccountSyncer) Sync(ctx *synccontext.SyncContext, event *synccon
 			retErr = utilerrors.NewAggregate([]error{retErr, err})
 		}
 		if retErr != nil {
-			s.EventRecorder().Eventf(event.Virtual, "Warning", "SyncError", "Error syncing: %v", retErr)
+			s.EventRecorder().Eventf(
+				event.Virtual,
+				nil,
+				"Warning",
+				"SyncError",
+				fmt.Sprintf("Sync%s", event.Virtual.GetObjectKind().GroupVersionKind().Kind),
+				"Error syncing: %v",
+				retErr,
+			)
 		}
 	}()
 
-	event.Host.Annotations = translate.HostAnnotations(event.Virtual, event.Host)
-	if event.Source == synccontext.SyncEventSourceHost {
-		event.Virtual.Labels = translate.VirtualLabels(event.Host, event.Virtual)
-	} else {
-		event.Host.Labels = translate.HostLabels(event.Virtual, event.Host)
-	}
+	// bi-directional sync of annotations and labels
+	event.Virtual.Annotations, event.Host.Annotations = translate.AnnotationsBidirectionalUpdate(event)
+	event.Virtual.Labels, event.Host.Labels = translate.LabelsBidirectionalUpdate(event)
 
 	return ctrl.Result{}, nil
 }
 
 func (s *serviceAccountSyncer) SyncToVirtual(ctx *synccontext.SyncContext, event *synccontext.SyncToVirtualEvent[*corev1.ServiceAccount]) (_ ctrl.Result, retErr error) {
-	if event.IsDelete() || event.Host.DeletionTimestamp != nil {
+	if event.VirtualOld != nil || translate.ShouldDeleteHostObject(event.Host) {
 		// virtual object is not here anymore, so we delete
-		return syncer.DeleteHostObject(ctx, event.Host, "virtual object was deleted")
+		return patcher.DeleteHostObject(ctx, event.Host, event.VirtualOld, "virtual object was deleted")
 	}
 
 	vObj := translate.VirtualMetadata(event.Host, s.HostToVirtual(ctx, types.NamespacedName{Name: event.Host.Name, Namespace: event.Host.Namespace}, event.Host))
-	return syncer.CreateVirtualObject(ctx, event.Host, vObj, s.EventRecorder())
+	err := pro.ApplyPatchesVirtualObject(ctx, nil, vObj, event.Host, ctx.Config.Sync.ToHost.ServiceAccounts.Patches, false)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	return patcher.CreateVirtualObject(ctx, event.Host, vObj, s.EventRecorder(), false)
 }

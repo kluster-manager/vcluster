@@ -7,11 +7,11 @@ import (
 	"github.com/loft-sh/vcluster/pkg/mappings"
 	"github.com/loft-sh/vcluster/pkg/mappings/resources"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
+	"github.com/loft-sh/vcluster/pkg/util/stringutil"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -22,31 +22,53 @@ const (
 )
 
 func (s *ingressSyncer) translate(ctx *synccontext.SyncContext, vIngress *networkingv1.Ingress) (*networkingv1.Ingress, error) {
-	newIngress := s.TranslateMetadata(ctx, vIngress).(*networkingv1.Ingress)
+	newIngress := translate.HostMetadata(vIngress, s.VirtualToHost(ctx, types.NamespacedName{Name: vIngress.Name, Namespace: vIngress.Namespace}, vIngress), s.excludedAnnotations...)
 	newIngress.Spec = *translateSpec(ctx, vIngress.Namespace, &vIngress.Spec)
-	newIngress.Annotations, _ = resources.TranslateIngressAnnotations(ctx, newIngress.Annotations, vIngress.Namespace)
+	newIngress.Annotations = updateAnnotations(ctx, newIngress.Annotations, vIngress.Namespace)
 	return newIngress, nil
 }
 
-func (s *ingressSyncer) TranslateMetadata(ctx *synccontext.SyncContext, vObj client.Object) client.Object {
-	ingress := vObj.(*networkingv1.Ingress).DeepCopy()
-	updateAnnotations(ctx, ingress)
-	return translate.HostMetadata(vObj, s.VirtualToHost(ctx, types.NamespacedName{Name: vObj.GetName(), Namespace: vObj.GetNamespace()}, vObj))
-}
+func (s *ingressSyncer) translateUpdate(ctx *synccontext.SyncContext, event *synccontext.SyncEvent[*networkingv1.Ingress]) {
+	event.Host.Spec = *translateSpec(ctx, event.Virtual.Namespace, &event.Virtual.Spec)
 
-func (s *ingressSyncer) TranslateMetadataUpdate(ctx *synccontext.SyncContext, vObj client.Object, pObj client.Object) (annotations map[string]string, labels map[string]string) {
-	vIngress := vObj.(*networkingv1.Ingress).DeepCopy()
-	updateAnnotations(ctx, vIngress)
-	return translate.HostAnnotations(vIngress, pObj), translate.HostLabels(vIngress, pObj)
-}
+	// bi-directional sync of labels & annotations
+	event.Virtual.Labels, event.Host.Labels = translate.LabelsBidirectionalUpdate(event)
+	event.Virtual.Annotations, event.Host.Annotations = translate.AnnotationsBidirectionalUpdateFunction(
+		event,
+		func(key string, value interface{}) (string, interface{}) {
+			// we need to ignore the rewritten annotations here
+			if resources.TranslateAnnotations[key] {
+				return "", nil
+			}
+			if strings.HasPrefix(key, AlbActionsAnnotation) || strings.HasPrefix(key, AlbConditionAnnotation) {
+				return "", nil
+			}
+			if stringutil.Contains(s.excludedAnnotations, key) {
+				return "", nil
+			}
+			return key, value
+		},
+		func(key string, value interface{}) (string, interface{}) {
+			// we ignore delete values
+			strValue, ok := value.(string)
+			if !ok {
+				return key, value
+			}
+			// we ignore excluded annotations
+			if stringutil.Contains(s.excludedAnnotations, key) {
+				return "", nil
+			}
 
-func (s *ingressSyncer) translateUpdate(ctx *synccontext.SyncContext, pObj, vObj *networkingv1.Ingress) {
-	pObj.Spec = *translateSpec(ctx, vObj.Namespace, &vObj.Spec)
-
-	var translatedAnnotations map[string]string
-	translatedAnnotations, pObj.Labels = s.TranslateMetadataUpdate(ctx, vObj, pObj)
-	translatedAnnotations, _ = resources.TranslateIngressAnnotations(ctx, translatedAnnotations, vObj.Namespace)
-	pObj.Annotations = translatedAnnotations
+			// translate the annotation
+			translatedAnnotations := updateAnnotations(ctx, map[string]string{
+				key: strValue,
+			}, event.Virtual.Namespace)
+			for k, v := range translatedAnnotations {
+				return k, v
+			}
+			return "", nil
+		},
+	)
 }
 
 func translateSpec(ctx *synccontext.SyncContext, namespace string, vIngressSpec *networkingv1.IngressSpec) *networkingv1.IngressSpec {
@@ -145,10 +167,13 @@ func processAlbAnnotations(ctx *synccontext.SyncContext, namespace string, k str
 	return k, v
 }
 
-func updateAnnotations(ctx *synccontext.SyncContext, ingress *networkingv1.Ingress) {
-	for k, v := range ingress.Annotations {
-		delete(ingress.Annotations, k)
-		k, v = processAlbAnnotations(ctx, ingress.Namespace, k, v)
-		ingress.Annotations[k] = v
+func updateAnnotations(ctx *synccontext.SyncContext, vAnnotations map[string]string, vNamespace string) map[string]string {
+	retAnnotations := map[string]string{}
+	for k, v := range vAnnotations {
+		k, v = processAlbAnnotations(ctx, vNamespace, k, v)
+		retAnnotations[k] = v
 	}
+
+	retAnnotations, _ = resources.TranslateIngressAnnotations(ctx, retAnnotations, vNamespace)
+	return retAnnotations
 }

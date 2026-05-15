@@ -3,8 +3,9 @@ package networkpolicies
 import (
 	"fmt"
 
-	"github.com/loft-sh/vcluster/pkg/mappings/generic"
+	"github.com/loft-sh/vcluster/pkg/mappings"
 	"github.com/loft-sh/vcluster/pkg/patcher"
+	"github.com/loft-sh/vcluster/pkg/pro"
 	"github.com/loft-sh/vcluster/pkg/syncer"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	"github.com/loft-sh/vcluster/pkg/syncer/translator"
@@ -17,7 +18,7 @@ import (
 )
 
 func New(ctx *synccontext.RegisterContext) (syncertypes.Object, error) {
-	mapper, err := generic.NewMapper(ctx, &networkingv1.NetworkPolicy{}, translate.Default.HostName)
+	mapper, err := ctx.Mappings.ByGVK(mappings.NetworkingPolicies())
 	if err != nil {
 		return nil, err
 	}
@@ -31,22 +32,36 @@ type networkPolicySyncer struct {
 	syncertypes.GenericTranslator
 }
 
+var _ syncertypes.OptionsProvider = &networkPolicySyncer{}
+
+func (s *networkPolicySyncer) Options() *syncertypes.Options {
+	return &syncertypes.Options{
+		ObjectCaching: true,
+	}
+}
+
 var _ syncertypes.Syncer = &networkPolicySyncer{}
 
 func (s *networkPolicySyncer) Syncer() syncertypes.Sync[client.Object] {
-	return syncer.ToGenericSyncer[*networkingv1.NetworkPolicy](s)
+	return syncer.ToGenericSyncer(s)
 }
 
 func (s *networkPolicySyncer) SyncToHost(ctx *synccontext.SyncContext, event *synccontext.SyncToHostEvent[*networkingv1.NetworkPolicy]) (ctrl.Result, error) {
-	if event.IsDelete() {
-		return syncer.DeleteVirtualObject(ctx, event.Virtual, "host object was deleted")
+	if event.HostOld != nil || event.Virtual.DeletionTimestamp != nil {
+		return patcher.DeleteVirtualObject(ctx, event.Virtual, event.HostOld, "host object was deleted")
 	}
 
-	return syncer.CreateHostObject(ctx, event.Virtual, s.translate(ctx, event.Virtual), s.EventRecorder())
+	pObj := s.translate(ctx, event.Virtual)
+	err := pro.ApplyPatchesHostObject(ctx, nil, pObj, event.Virtual, ctx.Config.Sync.ToHost.NetworkPolicies.Patches, false)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return patcher.CreateHostObject(ctx, event.Virtual, pObj, s.EventRecorder(), false)
 }
 
 func (s *networkPolicySyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncEvent[*networkingv1.NetworkPolicy]) (_ ctrl.Result, retErr error) {
-	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual)
+	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual, patcher.TranslatePatches(ctx.Config.Sync.ToHost.NetworkPolicies.Patches, false))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("new syncer patcher: %w", err)
 	}
@@ -55,15 +70,28 @@ func (s *networkPolicySyncer) Sync(ctx *synccontext.SyncContext, event *synccont
 			retErr = utilerrors.NewAggregate([]error{retErr, err})
 		}
 		if retErr != nil {
-			s.EventRecorder().Eventf(event.Virtual, "Warning", "SyncError", "Error syncing: %v", retErr)
+			s.EventRecorder().Eventf(
+				event.Virtual,
+				nil,
+				"Warning",
+				"SyncError",
+				fmt.Sprintf("Sync%s", event.Virtual.GetObjectKind().GroupVersionKind().Kind),
+				"Error syncing: %v",
+				retErr,
+			)
 		}
 	}()
 
 	s.translateUpdate(event.Host, event.Virtual)
+
+	// bi-directional sync of annotations and labels
+	event.Virtual.Annotations, event.Host.Annotations = translate.AnnotationsBidirectionalUpdate(event)
+	event.Virtual.Labels, event.Host.Labels = translate.LabelsBidirectionalUpdate(event)
+
 	return ctrl.Result{}, nil
 }
 
 func (s *networkPolicySyncer) SyncToVirtual(ctx *synccontext.SyncContext, event *synccontext.SyncToVirtualEvent[*networkingv1.NetworkPolicy]) (_ ctrl.Result, retErr error) {
 	// virtual object is not here anymore, so we delete
-	return syncer.DeleteHostObject(ctx, event.Host, "virtual object was deleted")
+	return patcher.DeleteHostObject(ctx, event.Host, event.VirtualOld, "virtual object was deleted")
 }

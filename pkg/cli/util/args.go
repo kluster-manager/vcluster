@@ -1,10 +1,16 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/loft-sh/log"
+	"github.com/loft-sh/log/survey"
+	"github.com/loft-sh/log/terminal"
 	"github.com/spf13/cobra"
+
+	agentstoragev1 "github.com/loft-sh/agentapi/v4/pkg/apis/loft/storage/v1"
 )
 
 var (
@@ -14,6 +20,21 @@ var (
 	VClusterNameOnlyUseLine string
 
 	VClusterNameOnlyValidator cobra.PositionalArgs
+)
+
+var (
+	ErrNonInteractive   = errors.New("terminal is not interactive")
+	ErrTooManyArguments = errors.New("too many arguments specified")
+
+	// prompt responses
+	PositiveResponse = "yes"
+	NegativeResponse = "no"
+)
+
+const (
+	InstanceVirtualClusterDBConnectorSynced agentstoragev1.ConditionType = "DBConnectorSynced"
+
+	DBConnectorSecretNotFound string = "DBConnectorSecretNotFound"
 )
 
 func init() {
@@ -66,4 +87,32 @@ func NamedPositionalArgsValidator(failMissing, failExtra bool, expectedArgs ...s
 
 		return nil
 	}
+}
+
+// PromptForArgs expects that the terminal is interactive and the number of args, matched the number of argNames, in the
+// order they should appear and will prompt one by one for the missing args adding them to the args slice and returning
+// a new set for a command to use. It returns the args, rather than a nil slice so they're unaltered in error cases.
+func PromptForArgs(l log.Logger, args []string, argNames ...string) ([]string, error) {
+	if !terminal.IsTerminalIn {
+		return args, ErrNonInteractive
+	}
+	if len(args) > len(argNames) {
+		return args, ErrTooManyArguments
+	}
+
+	if len(args) == len(argNames) {
+		return args, nil
+	}
+
+	for i := range argNames[len(args):] {
+		answer, err := l.Question(&survey.QuestionOptions{
+			Question: fmt.Sprintf("Please specify %s", argNames[i]),
+		})
+		if err != nil {
+			return args, err
+		}
+		args = append(args, answer)
+	}
+
+	return args, nil
 }

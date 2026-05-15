@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+//nolint:staticcheck // SA1019: corev1.Endpoints is deprecated, but still required for compatibility
 func TestCreateOrPatch(t *testing.T) {
 	ctx := context.Background()
 	InitialVirtualState := []runtime.Object{}
@@ -39,11 +40,11 @@ func TestCreateOrPatch(t *testing.T) {
 			},
 		},
 	}
-	p := &v1Provider{}
-	err := p.createOrPatch(ctx, virtualClient, endpoints)
+	p := &EndpointsV1Provider{}
+	err := p.CreateOrPatch(ctx, virtualClient, endpoints)
 	assert.NilError(t, err, "")
 
-	pbeta := &v1BetaProvider{}
-	err = pbeta.createOrPatch(ctx, virtualClient, endpoints)
+	pbeta := &EndpointsV1BetaProvider{}
+	err = pbeta.CreateOrPatch(ctx, virtualClient, endpoints)
 	assert.NilError(t, err, "")
 }

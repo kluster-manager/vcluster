@@ -3,15 +3,17 @@ package config
 import (
 	"fmt"
 	"os"
-	"regexp"
+	"strings"
 
 	"github.com/loft-sh/vcluster/config"
+	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/strvals"
+	"github.com/loft-sh/vcluster/pkg/util/loghelper"
+	"github.com/loft-sh/vcluster/pkg/util/stringutil"
 	"github.com/pkg/errors"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/yaml"
 )
-
-var digitsOnlyRegex = regexp.MustCompile("^[0-9]+$")
 
 func ParseConfig(path, name string, setValues []string) (*VirtualClusterConfig, error) {
 	// check if name is empty
@@ -25,8 +27,19 @@ func ParseConfig(path, name string, setValues []string) (*VirtualClusterConfig, 
 		return nil, err
 	}
 
+	cfg, err := ParseConfigBytes(rawFile, name, setValues)
+	if err != nil {
+		return nil, fmt.Errorf("parsing config bytes: %w", err)
+	}
+
+	cfg.Path = path
+
+	return cfg, nil
+}
+
+func ParseConfigBytes(data []byte, name string, setValues []string) (*VirtualClusterConfig, error) {
 	// apply set values
-	rawFile, err = applySetValues(rawFile, setValues)
+	rawFile, err := applySetValues(data, setValues)
 	if err != nil {
 		return nil, fmt.Errorf("apply set values: %w", err)
 	}
@@ -39,25 +52,51 @@ func ParseConfig(path, name string, setValues []string) (*VirtualClusterConfig, 
 		return nil, err
 	}
 
-	// build config
+	return parseConfigBytes(name, rawConfig)
+}
 
-	var svcName string
-	if digitsOnlyRegex.MatchString(name) {
-		svcName = fmt.Sprintf("vc-%s", name)
-	} else {
-		svcName = name
+func ParseStandaloneConfigBytes(data []byte, name string, setValues []string) (*VirtualClusterConfig, error) {
+	// apply set values
+	rawFile, err := applySetValues(data, setValues)
+	if err != nil {
+		return nil, fmt.Errorf("apply set values: %w", err)
 	}
 
+	// create a new strict decoder
+	rawConfig := &config.Config{}
+	err = yaml.UnmarshalStrict(rawFile, rawConfig)
+	if err != nil {
+		fmt.Printf("%#+v\n", errors.Unwrap(err))
+		return nil, err
+	}
+
+	// set standalone config
+	rawConfig.ControlPlane.Standalone.Enabled = true
+	rawConfig.PrivateNodes.Enabled = true
+	if rawConfig.ControlPlane.Standalone.DataDir == "" {
+		rawConfig.ControlPlane.Standalone.DataDir = constants.VClusterStandaloneDefaultDataDir
+	}
+
+	return parseConfigBytes(name, rawConfig)
+}
+
+func parseConfigBytes(name string, rawConfig *config.Config) (*VirtualClusterConfig, error) {
+	// build config
 	retConfig := &VirtualClusterConfig{
-		Config:              *rawConfig,
-		Name:                name,
-		ControlPlaneService: svcName,
+		Config: *rawConfig,
+		Name:   name,
 	}
 
 	// validate config
-	err = ValidateConfigAndSetDefaults(retConfig)
+	err := ValidateConfigAndSetDefaults(retConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	configLogger := loghelper.New("config")
+	warnings := Lint(retConfig.Config)
+	for _, warning := range warnings {
+		configLogger.Infof("Warning: %s", warning)
 	}
 
 	return retConfig, nil
@@ -90,4 +129,44 @@ func applySetValues(rawConfig []byte, setValues []string) ([]byte, error) {
 	}
 
 	return rawConfig, nil
+}
+
+func GetLocalCacheOptionsFromConfigMappings(mappings map[string]string, vClusterNamespace string) (cache.Options, bool) {
+	defaultNamespaces := make(map[string]cache.Config)
+	namespaces := parseHostNamespacesFromMappings(mappings, vClusterNamespace)
+	if len(namespaces) == 1 {
+		for _, k := range namespaces {
+			if k == vClusterNamespace {
+				// then there is no need to create custom manager
+				return cache.Options{}, false
+			}
+		}
+	}
+	for _, ns := range namespaces {
+		defaultNamespaces[ns] = cache.Config{}
+	}
+	return cache.Options{DefaultNamespaces: defaultNamespaces}, true
+}
+
+func parseHostNamespacesFromMappings(mappings map[string]string, vClusterNs string) []string {
+	ret := make([]string, 0)
+	for host := range mappings {
+		if host == constants.VClusterNamespaceInHostMappingSpecialCharacter {
+			ret = append(ret, vClusterNs)
+		}
+		parts := strings.Split(host, "/")
+		if len(parts) != 2 {
+			continue
+		}
+
+		if parts[0] == "" {
+			// this means that the mapping key is e.g. "/my-cm-1",
+			// then, we should append virtual cluster namespace
+			ret = append(ret, vClusterNs)
+			continue
+		}
+		hostNs := parts[0]
+		ret = append(ret, hostNs)
+	}
+	return stringutil.RemoveDuplicates(ret)
 }

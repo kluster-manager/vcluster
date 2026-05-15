@@ -3,6 +3,10 @@ package testing
 import (
 	vclusterconfig "github.com/loft-sh/vcluster/config"
 	"github.com/loft-sh/vcluster/pkg/config"
+	"k8s.io/apimachinery/pkg/version"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -21,12 +25,9 @@ func NewFakeConfig() *config.VirtualClusterConfig {
 
 	// parse config
 	vConfig := &config.VirtualClusterConfig{
-		Config:                  *defaultConfig,
-		Name:                    DefaultTestVClusterName,
-		ControlPlaneService:     DefaultTestVClusterName,
-		WorkloadService:         DefaultTestVClusterServiceName,
-		WorkloadNamespace:       DefaultTestTargetNamespace,
-		WorkloadTargetNamespace: DefaultTestTargetNamespace,
+		Config:        *defaultConfig,
+		Name:          DefaultTestVClusterName,
+		HostNamespace: DefaultTestTargetNamespace,
 	}
 
 	err = config.ValidateConfigAndSetDefaults(vConfig)
@@ -34,5 +35,18 @@ func NewFakeConfig() *config.VirtualClusterConfig {
 		panic(err.Error())
 	}
 
+	// SyncController builder expects non-nil HostConfig
+	vConfig.HostConfig = &rest.Config{
+		Host:    "",
+		APIPath: "",
+	}
+
+	fakeClient := fake.NewClientset()
+	fakeClient.Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = &version.Info{
+		Major:      "1",
+		Minor:      "31",
+		GitVersion: "v1.31.0",
+	}
+	vConfig.HostClient = fakeClient
 	return vConfig
 }

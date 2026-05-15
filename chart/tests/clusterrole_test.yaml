@@ -3,10 +3,40 @@ templates:
   - clusterrole.yaml
 
 tests:
-  - it: disable by default
+  - it: disable when volume snapshot rules are disabled
+    set:
+      rbac:
+        enableVolumeSnapshotRules:
+          enabled: false
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: enabled by default with default rules
+    asserts:
+      - hasDocuments:
+          count: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "persistentvolumes" ]
+            verbs:
+              [ "get", "list" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "snapshot.storage.k8s.io" ]
+            resources: [ "volumesnapshotclasses" ]
+            verbs:
+              [ "get", "list" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "snapshot.storage.k8s.io" ]
+            resources: [ "volumesnapshotcontents" ]
+            verbs:
+              [ "create", "delete", "patch", "update", "get", "list" ]
 
   - it: force enable
     set:
@@ -34,25 +64,42 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: enable isolated control plane
+  - it: enable scheduler (k8s distro explicitly enabled)
     set:
-      experimental:
-        isolatedControlPlane:
-          enabled: true
+      controlPlane:
+        distro:
+          k8s:
+            enabled: true
+            scheduler:
+              enabled: true
+    asserts:
+    - hasDocuments:
+        count: 1
+    - contains:
+        path: rules
+        content:
+          apiGroups: [ "storage.k8s.io" ]
+          resources: [ "storageclasses", "csinodes", "csidrivers", "csistoragecapacities" ]
+          verbs: [ "get", "watch", "list" ]
+
+  - it: enable scheduler (k8s distro implicitly enabled)
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            scheduler:
+              enabled: true
     asserts:
       - hasDocuments:
-          count: 1
-      - lengthEqual:
-          path: rules
           count: 1
       - contains:
           path: rules
           content:
-            apiGroups: [ "" ]
-            resources: [ "nodes" ]
+            apiGroups: [ "storage.k8s.io" ]
+            resources: [ "storageclasses", "csinodes", "csidrivers", "csistoragecapacities" ]
             verbs: [ "get", "watch", "list" ]
 
-  - it: enable scheduler
+  - it: enable scheduler (deprecated)
     set:
       controlPlane:
         advanced:
@@ -67,6 +114,23 @@ tests:
             apiGroups: [ "storage.k8s.io" ]
             resources: [ "storageclasses", "csinodes", "csidrivers", "csistoragecapacities" ]
             verbs: [ "get", "watch", "list" ]
+
+  - it: enable hybrid scheduling
+    set:
+      sync:
+        toHost:
+          pods:
+            hybridScheduling:
+              enabled: true
+    asserts:
+    - hasDocuments:
+        count: 1
+    - contains:
+        path: rules
+        content:
+          apiGroups: [ "storage.k8s.io" ]
+          resources: [ "storageclasses", "csinodes", "csidrivers", "csistoragecapacities" ]
+          verbs: [ "get", "watch", "list" ]
 
   - it: enable csinodes
     set:
@@ -89,20 +153,21 @@ tests:
       rbac:
         clusterRole:
           enabled: auto
-      experimental:
-        multiNamespaceMode:
-          enabled: true
+      sync:
+        toHost:
+          namespaces:
+            enabled: true
     asserts:
       - hasDocuments:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 4
       - contains:
           path: rules
           content:
             apiGroups: [ "" ]
-            resources: [ "namespaces", "serviceaccounts" ]
+            resources: [ "namespaces", "serviceaccounts"]
             verbs: [ "create", "delete", "patch", "update", "get", "watch", "list" ]
 
   - it: override rules
@@ -147,7 +212,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 2
+          count: 5
       - contains:
           path: rules
           content:
@@ -178,7 +243,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 2
+          count: 5
       - contains:
           path: rules
           content:
@@ -204,7 +269,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 4
       - contains:
           path: rules
           content:
@@ -212,7 +277,7 @@ tests:
             resources: [ "services", "endpoints" ]
             verbs: [ "get", "watch", "list" ]
 
-  - it: real nodes
+  - it: real nodes with default proxyKubelets
     set:
       sync:
         fromHost:
@@ -223,13 +288,49 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 5
       - contains:
           path: rules
           content:
             apiGroups: [ "" ]
-            resources: [ "pods", "nodes", "nodes/status", "nodes/metrics", "nodes/stats", "nodes/proxy" ]
+            resources: [ "pods", "nodes", "nodes/status" ]
             verbs: [ "get", "watch", "list" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "nodes/metrics", "nodes/stats", "nodes/proxy" ]
+            verbs: [ "get" ]
+
+  - it: real nodes without proxyKubelets
+    set:
+      sync:
+        fromHost:
+          nodes:
+            enabled: true
+      networking:
+        advanced:
+          proxyKubelets:
+            byHostname: false
+            byIP: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 4
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "pods", "nodes", "nodes/status" ]
+            verbs: [ "get", "watch", "list" ]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "nodes/metrics", "nodes/stats", "nodes/proxy" ]
+            verbs: [ "get" ]
 
   - it: virtual scheduler
     set:
@@ -242,7 +343,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 4
       - contains:
           path: rules
           content:
@@ -258,12 +359,12 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 3
+          count: 6
       - contains:
           path: rules
           content:
             apiGroups: [ "" ]
-            resources: [ "pods", "nodes", "nodes/status", "nodes/metrics", "nodes/stats", "nodes/proxy" ]
+            resources: [ "pods", "nodes", "nodes/status" ]
             verbs: [ "get", "watch", "list" ]
       - contains:
           path: rules
@@ -277,6 +378,12 @@ tests:
             apiGroups: ["management.loft.sh"]
             resources: ["virtualclusterinstances"]
             verbs: ["get"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "nodes/metrics", "nodes/stats", "nodes/proxy" ]
+            verbs: [ "get" ]
 
   - it: metrics proxy
     set:
@@ -312,7 +419,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 4
       - contains:
           path: rules
           content:
@@ -332,7 +439,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 2
+          count: 5
       - contains:
           path: rules
           content:
@@ -345,12 +452,31 @@ tests:
             apiGroups: ["admissionregistration.k8s.io"]
             resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
             verbs: ["get", "list", "watch"]
-
+  - it: certManger enabled
+    set:
+      integrations:
+        certManager:
+          enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 5
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["cert-manager.io"]
+            resources: ["clusterissuers"]
+            verbs: ["get", "list", "watch"]
   - it: crd sync to host
     set:
       sync:
         toHost:
-          customResourceDefinitions:
+          customResources:
             test.test-group:
               enabled: true
     release:
@@ -361,7 +487,7 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 1
+          count: 4
       - contains:
           path: rules
           content:
@@ -373,9 +499,13 @@ tests:
     set:
       sync:
         fromHost:
-          customResourceDefinitions:
+          customResources:
             test.test-group:
               enabled: true
+              scope: Cluster
+            test.test-versioned-group/v1alpha1:
+              enabled: true
+              scope: Cluster
     release:
       name: my-release
       namespace: my-namespace
@@ -384,11 +514,17 @@ tests:
           count: 1
       - lengthEqual:
           path: rules
-          count: 2
+          count: 6
       - contains:
           path: rules
           content:
             apiGroups: [ "test-group" ]
+            resources: [ "test" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "test-versioned-group" ]
             resources: [ "test" ]
             verbs: [ "get", "list", "watch" ]
       - contains:
@@ -405,8 +541,9 @@ tests:
           webhook:
             enabled: true
           sync:
-            clusterStores:
-              enabled: true
+            fromHost:
+              clusterStores:
+                enabled: true
     release:
       name: my-release
       namespace: my-namespace
@@ -425,3 +562,363 @@ tests:
             apiGroups: [ "external-secrets.io" ]
             resources: [ "clustersecretstores" ]
             verbs: ["get", "list", "watch"]
+
+  - it: fromHost sync configmaps disabled
+    set:
+      sync:
+        fromHost:
+          configMaps:
+            enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: fromHost sync configmaps enabled with wildcard namespace
+    set:
+      sync:
+        fromHost:
+          configMaps:
+            enabled: true
+            mappings:
+              byName:
+                "": "my-ns/*"
+                my-ns/*: "my-ns-2/*"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: ["NAMESPACE", "my-ns"]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "configmaps" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "configmaps" ]
+            verbs: [ "get" ]
+
+  - it: fromHost sync configmaps enabled with wildcard name
+    set:
+      sync:
+        fromHost:
+          configMaps:
+            enabled: true
+            mappings:
+              byName:
+                "my-ns/*": "my-ns-4/*"
+                my-ns-2/*: "my-ns-3/*"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: ["my-ns", "my-ns-2"]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "configmaps" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "configmaps" ]
+            verbs: [ "get" ]
+
+  - it: fromHost sync configmaps enabled without wildcards
+    set:
+      sync:
+        fromHost:
+          configMaps:
+            enabled: true
+            mappings:
+              byName:
+                "my-ns/my-cm": "my-ns-2/my-cm-2"
+                my-ns-3/my-cm-2: "my-ns-4/my-cm4"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: [ "my-ns", "my-ns-3" ]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "configmaps" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: [ "my-cm", "my-cm-2" ]
+            resources: [ "configmaps" ]
+            verbs: [ "get"]
+
+  - it: fromHost sync secrets disabled
+    set:
+      sync:
+        fromHost:
+          secrets:
+            enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: fromHost sync secrets enabled with wildcard namespace
+    set:
+      sync:
+        fromHost:
+          secrets:
+            enabled: true
+            mappings:
+              byName:
+                "": "my-ns/*"
+                my-ns/*: "my-ns-2/*"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: ["NAMESPACE", "my-ns"]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "secrets" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "secrets" ]
+            verbs: [ "get"]
+
+  - it: fromHost sync secrets enabled with wildcard name
+    set:
+      sync:
+        fromHost:
+          secrets:
+            enabled: true
+            mappings:
+              byName:
+                "my-ns/*": "my-ns-4/*"
+                my-ns-2/*: "my-ns-3/*"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: ["my-ns", "my-ns-2"]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "secrets" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "secrets" ]
+            verbs: [ "get" ]
+
+  - it: fromHost sync secrets enabled without wildcards
+    set:
+      sync:
+        fromHost:
+          secrets:
+            enabled: true
+            mappings:
+              byName:
+                "my-ns/my-secret": "my-ns-2/my-secret-2"
+                my-ns-3/my-secret-2: "my-ns-4/my-secret-4"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 6
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: [ "my-ns", "my-ns-3" ]
+            resources: [ "namespaces" ]
+            verbs: [ "get", "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "secrets" ]
+            verbs: [ "list", "watch" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resourceNames: [ "my-secret", "my-secret-2" ]
+            resources: [ "secrets" ]
+            verbs: [ "get" ]
+  - it: istio enabled
+    set:
+      integrations:
+        istio:
+          enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: rules
+          count: 4
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "apiextensions.k8s.io" ]
+            resources: [ "customresourcedefinitions" ]
+            verbs: [ "get", "list", "watch" ]
+
+  - it: volume snapshot rules
+    set:
+      rbac:
+        enableVolumeSnapshotRules:
+          enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "" ]
+            resources: [ "persistentvolumes" ]
+            verbs:
+              [ "get", "list" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "snapshot.storage.k8s.io" ]
+            resources: [ "volumesnapshotclasses" ]
+            verbs:
+              [ "get", "list" ]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [ "snapshot.storage.k8s.io" ]
+            resources: [ "volumesnapshotcontents" ]
+            verbs:
+              [ "create", "delete", "patch", "update", "get", "list" ]
+
+  - it: resourceClaims rules
+    set:
+      sync:
+        toHost:
+          resourceClaims:
+            enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["resource.k8s.io"]
+            resources: ["deviceclasses"]
+            verbs: ["get", "watch", "list"]
+
+  - it: deviceClasses rules
+    set:
+      sync:
+        fromHost:
+          deviceClasses:
+            enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["resource.k8s.io"]
+            resources: ["deviceclasses"]
+            verbs: ["get", "watch", "list"]
+
+  - it: resourceClaimTemplates rules
+    set:
+      sync:
+        toHost:
+          resourceClaimTemplates:
+            enabled: true
+    release:
+      name: my-release
+      namespace: my-namespace
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["resource.k8s.io"]
+            resources: ["deviceclasses"]
+            verbs: ["get", "watch", "list"]

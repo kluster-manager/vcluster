@@ -25,7 +25,7 @@ type recorder struct {
 }
 
 func (n *recorder) Migrate(ctx *synccontext.RegisterContext, mapper synccontext.Mapper) error {
-	gvk := n.Mapper.GroupVersionKind()
+	gvk := n.GroupVersionKind()
 	listGvk := schema.GroupVersionKind{
 		Group:   gvk.Group,
 		Version: gvk.Version,
@@ -33,7 +33,7 @@ func (n *recorder) Migrate(ctx *synccontext.RegisterContext, mapper synccontext.
 	}
 
 	// migrate host objects first
-	hostObjects, err := listObjects(ctx, ctx.PhysicalManager.GetClient(), listGvk)
+	hostObjects, err := listObjects(ctx, ctx.HostManager.GetClient(), listGvk)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func RecordMapping(ctx *synccontext.SyncContext, pName, vName types.NamespacedNa
 		}
 
 		// record the reference
-		err := ctx.Mappings.Store().AddReference(ctx, synccontext.NameMapping{
+		err := ctx.Mappings.Store().AddReferenceAndSave(ctx, synccontext.NameMapping{
 			GroupVersionKind: gvk,
 
 			HostName:    pName,

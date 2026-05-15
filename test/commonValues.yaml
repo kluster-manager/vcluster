@@ -43,7 +43,11 @@ networking:
       to: default/test
     - from: test/nginx
       to: default/nginx
-      
+
 experimental:
   syncSettings:
     setOwner: true
+
+policies:
+  networkPolicy:
+    enabled: true

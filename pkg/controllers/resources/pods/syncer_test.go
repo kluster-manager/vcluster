@@ -1,23 +1,28 @@
 package pods
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"testing"
 
+	"gotest.tools/assert"
+	corev1 "k8s.io/api/core/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/pod-security-admission/api"
+	"k8s.io/utils/ptr"
+
+	"github.com/loft-sh/vcluster/pkg/config"
 	podtranslate "github.com/loft-sh/vcluster/pkg/controllers/resources/pods/translate"
 	"github.com/loft-sh/vcluster/pkg/specialservices"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertesting "github.com/loft-sh/vcluster/pkg/syncer/testing"
 	testingutil "github.com/loft-sh/vcluster/pkg/util/testing"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
-	"gotest.tools/assert"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/pod-security-admission/api"
-	"k8s.io/utils/ptr"
 )
 
 var (
@@ -201,7 +206,7 @@ func TestSyncTable(t *testing.T) {
 					EnableServiceLinks:           ptr.To(false),
 					HostAliases: []corev1.HostAlias{{
 						IP:        pVclusterService.Spec.ClusterIP,
-						Hostnames: []string{"kubernetes", "kubernetes.default", "kubernetes.default.svc"},
+						Hostnames: []string{"kubernetes.default.svc.cluster.local", "kubernetes", "kubernetes.default", "kubernetes.default.svc"},
 					}},
 					ServiceAccountName: "vc-workload-vcluster",
 					Hostname:           vObjectMeta.Name,
@@ -215,7 +220,7 @@ func TestSyncTable(t *testing.T) {
 					EnableServiceLinks:           ptr.To(false),
 					HostAliases: []corev1.HostAlias{{
 						IP:        pVclusterService.Spec.ClusterIP,
-						Hostnames: []string{"kubernetes", "kubernetes.default", "kubernetes.default.svc"},
+						Hostnames: []string{"kubernetes.default.svc.cluster.local", "kubernetes", "kubernetes.default", "kubernetes.default.svc"},
 					}},
 					ServiceAccountName: "vc-workload-vcluster",
 					Hostname:           vObjectMeta.Name,
@@ -278,7 +283,12 @@ func TestSyncTable(t *testing.T) {
 			if tC.syncToHost {
 				_, err = syncer.(*podSyncer).SyncToHost(syncCtx, synccontext.NewSyncToHostEvent(vPodInitial.DeepCopy()))
 			} else {
-				_, err = syncer.(*podSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pPodInitial.DeepCopy(), vPodInitial.DeepCopy()))
+				_, err = syncer.(*podSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(
+					pPodInitial.DeepCopy(),
+					pPodInitial.DeepCopy(),
+					vPodInitial.DeepCopy(),
+					vPodInitial.DeepCopy(),
+				))
 			}
 			assert.NilError(t, err)
 
@@ -384,7 +394,7 @@ func TestSync(t *testing.T) {
 			EnableServiceLinks:           ptr.To(false),
 			HostAliases: []corev1.HostAlias{{
 				IP:        pVclusterService.Spec.ClusterIP,
-				Hostnames: []string{"kubernetes", "kubernetes.default", "kubernetes.default.svc"},
+				Hostnames: []string{"kubernetes.default.svc.cluster.local", "kubernetes", "kubernetes.default", "kubernetes.default.svc"},
 			}},
 			ServiceAccountName: "vc-workload-vcluster",
 			Hostname:           vObjectMeta.Name,
@@ -488,7 +498,7 @@ func TestSync(t *testing.T) {
 			EnableServiceLinks:           ptr.To(false),
 			HostAliases: []corev1.HostAlias{{
 				IP:        pVclusterService.Spec.ClusterIP,
-				Hostnames: []string{"kubernetes", "kubernetes.default", "kubernetes.default.svc"},
+				Hostnames: []string{"kubernetes.default.svc.cluster.local", "kubernetes", "kubernetes.default", "kubernetes.default.svc"},
 			}},
 			Hostname:           vHostPathPod.Name,
 			ServiceAccountName: "vc-workload-vcluster",
@@ -582,6 +592,39 @@ func TestSync(t *testing.T) {
 		},
 	}
 
+	priorityClassName := "high-priority"
+	pPriorityClass := &schedulingv1.PriorityClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: priorityClassName,
+		},
+	}
+	vPodWithoutPriorityClass := &corev1.Pod{
+		ObjectMeta: vObjectMeta,
+		Spec:       corev1.PodSpec{},
+	}
+	vPodWithPriorityClass := &corev1.Pod{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.PodSpec{
+			PriorityClassName: pPriorityClass.Name,
+		},
+	}
+	pPodWithPriorityClass := &corev1.Pod{
+		ObjectMeta: pObjectMeta,
+		Spec: corev1.PodSpec{
+			AutomountServiceAccountToken: ptr.To(false),
+			EnableServiceLinks:           ptr.To(false),
+			HostAliases: []corev1.HostAlias{{
+				IP:        pVclusterService.Spec.ClusterIP,
+				Hostnames: []string{"kubernetes.default.svc.cluster.local", "kubernetes", "kubernetes.default", "kubernetes.default.svc"},
+			}},
+			Hostname:           vPodWithPriorityClass.Name,
+			ServiceAccountName: "vc-workload-vcluster",
+			PriorityClassName:  pPriorityClass.Name,
+		},
+	}
+	pPodWithTranslatedPriorityClass := pPodWithPriorityClass.DeepCopy()
+	pPodWithTranslatedPriorityClass.Spec.PriorityClassName = "vcluster-high-priority-x-test-x-vcluster"
+
 	syncertesting.RunTests(t, []*syncertesting.SyncTest{
 		{
 			Name:                 "Map hostpaths",
@@ -600,5 +643,167 @@ func TestSync(t *testing.T) {
 				assert.NilError(t, err)
 			},
 		},
+		{
+			Name:                 "From Host PriorityClasses sync enabled",
+			InitialVirtualState:  []runtime.Object{vPodWithPriorityClass, vNamespace.DeepCopy()},
+			InitialPhysicalState: []runtime.Object{pPriorityClass, pVclusterService.DeepCopy(), pDNSService.DeepCopy()},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Pod"): {pPodWithPriorityClass},
+			},
+			AdjustConfig: func(vConfig *config.VirtualClusterConfig) {
+				vConfig.Sync.FromHost.PriorityClasses.Enabled = true
+			},
+			Sync: func(ctx *synccontext.RegisterContext) {
+				syncContext, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				_, err := syncer.(*podSyncer).SyncToHost(syncContext, synccontext.NewSyncToHostEvent(vPodWithPriorityClass))
+				assert.NilError(t, err)
+			},
+		},
+		{
+			Name:                 "To Host PriorityClasses sync enabled",
+			InitialVirtualState:  []runtime.Object{vPodWithPriorityClass, vNamespace.DeepCopy()},
+			InitialPhysicalState: []runtime.Object{pVclusterService.DeepCopy(), pDNSService.DeepCopy()},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Pod"): {pPodWithTranslatedPriorityClass},
+			},
+			AdjustConfig: func(vConfig *config.VirtualClusterConfig) {
+				vConfig.Sync.ToHost.PriorityClasses.Enabled = true
+			},
+			Sync: func(ctx *synccontext.RegisterContext) {
+				syncContext, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				_, err := syncer.(*podSyncer).SyncToHost(syncContext, synccontext.NewSyncToHostEvent(vPodWithPriorityClass))
+				assert.NilError(t, err)
+			},
+		},
+		{
+			Name:                 "To Host Pods.PriorityClassName set",
+			InitialVirtualState:  []runtime.Object{vPodWithoutPriorityClass, vNamespace.DeepCopy()},
+			InitialPhysicalState: []runtime.Object{pVclusterService.DeepCopy(), pDNSService.DeepCopy()},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Pod"): {pPodWithPriorityClass},
+			},
+			AdjustConfig: func(vConfig *config.VirtualClusterConfig) {
+				vConfig.Sync.ToHost.Pods.PriorityClassName = priorityClassName
+			},
+			Sync: func(ctx *synccontext.RegisterContext) {
+				syncContext, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				_, err := syncer.(*podSyncer).SyncToHost(syncContext, synccontext.NewSyncToHostEvent(vPodWithoutPriorityClass))
+				assert.NilError(t, err)
+			},
+		},
+	})
+}
+
+func TestBuildResizePatch(t *testing.T) {
+	makePod := func(memory string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "c1",
+						Image: "nginx",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("100m"),
+								corev1.ResourceMemory: resource.MustParse(memory),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse(memory),
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("creates patch when resources differ", func(t *testing.T) {
+		vPod := makePod("30Mi")
+		pPod := makePod("20Mi")
+
+		patchBytes, err := buildHostPodContainersResourcesResizePatch(vPod, pPod)
+		assert.NilError(t, err)
+		assert.Assert(t, patchBytes != nil)
+
+		var patch resizePatch
+		err = json.Unmarshal(patchBytes, &patch)
+		assert.NilError(t, err)
+		assert.Equal(t, len(patch.Spec.Containers), 1)
+		assert.Equal(t, patch.Spec.Containers[0].Name, "c1")
+		got := patch.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]
+		assert.Assert(t, got.Cmp(resource.MustParse("30Mi")) == 0)
+	})
+
+	t.Run("returns nil when resources are equal", func(t *testing.T) {
+		vPod := makePod("20Mi")
+		pPod := makePod("20Mi")
+
+		patchBytes, err := buildHostPodContainersResourcesResizePatch(vPod, pPod)
+		assert.NilError(t, err)
+		assert.Assert(t, patchBytes == nil)
+	})
+
+	t.Run("includes only containers with resource diffs", func(t *testing.T) {
+		vPod := makePod("30Mi")
+		vPod.Spec.Containers = append(vPod.Spec.Containers, corev1.Container{
+			Name:  "c2",
+			Image: "busybox",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("10Mi"),
+				},
+			},
+		})
+		pPod := makePod("20Mi")
+		pPod.Spec.Containers = append(pPod.Spec.Containers, corev1.Container{
+			Name:  "c2",
+			Image: "busybox",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("10Mi"),
+				},
+			},
+		})
+
+		patchBytes, err := buildHostPodContainersResourcesResizePatch(vPod, pPod)
+		assert.NilError(t, err)
+		assert.Assert(t, patchBytes != nil)
+
+		var patch resizePatch
+		err = json.Unmarshal(patchBytes, &patch)
+		assert.NilError(t, err)
+		assert.Equal(t, len(patch.Spec.Containers), 1)
+		assert.Equal(t, patch.Spec.Containers[0].Name, "c1")
+	})
+
+	t.Run("skips containers missing on host", func(t *testing.T) {
+		vPod := makePod("30Mi")
+		vPod.Spec.Containers = append(vPod.Spec.Containers, corev1.Container{
+			Name:  "c2",
+			Image: "busybox",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("10Mi"),
+				},
+			},
+		})
+		pPod := makePod("20Mi")
+
+		patchBytes, err := buildHostPodContainersResourcesResizePatch(vPod, pPod)
+		assert.NilError(t, err)
+		assert.Assert(t, patchBytes != nil)
+
+		var patch resizePatch
+		err = json.Unmarshal(patchBytes, &patch)
+		assert.NilError(t, err)
+		assert.Equal(t, len(patch.Spec.Containers), 1)
+		assert.Equal(t, patch.Spec.Containers[0].Name, "c1")
 	})
 }

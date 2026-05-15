@@ -7,9 +7,9 @@ vars:
   DEVSPACE_FLAGS: "-n vcluster"
   SYNCER_IMAGE: ghcr.io/loft-sh/loft-enterprise/dev-vcluster
   COMMON_VALUES: ./test/commonValues.yaml
+  CONFORMANCE_VALUES: ./test/conformanceValues.yaml
   PRO_VALUES: ./test/proValues.yaml
   VALUES_FILE: ./test/e2e/values.yaml
-  RELEASE_NAME: "vcluster"
 
 # Images DevSpace will build for vcluster
 images:
@@ -22,16 +22,17 @@ images:
 
 # Deployment used for vcluster
 deployments:
-  vcluster-k8s:
+  vcluster:
     helm:
-      releaseName: ${RELEASE_NAME}
+      releaseName: vcluster
       chart:
         name: ./chart
       values:
         controlPlane:
           distro:
             k8s:
-              enabled: true
+              image:
+                tag: v1.36.0
           statefulSet:
             image:
               registry: ""
@@ -50,61 +51,6 @@ deployments:
         telemetry:
           enabled: false
 
-  vcluster-k3s:
-    helm:
-      releaseName: ${RELEASE_NAME}
-      chart:
-        name: ./chart
-      values:
-        controlPlane:
-          distro:
-            k3s:
-              enabled: true
-          statefulSet:
-            image:
-              registry: ""
-              repository: image(${SYNCER_IMAGE})
-              tag: tag(${SYNCER_IMAGE})
-            scheduling:
-              tolerations:
-                - operator: "Exists"
-          service:
-            spec:
-              type: NodePort
-          advanced:
-            serviceAccount:
-              enabled: false
-              name: default
-        telemetry:
-          enabled: false
-
-  vcluster-k0s:
-    helm:
-      releaseName: ${RELEASE_NAME}
-      chart:
-        name: ./chart
-      values:
-        controlPlane:
-          distro:
-            k0s:
-              enabled: true
-          statefulSet:
-            image:
-              registry: ""
-              repository: image(${SYNCER_IMAGE})
-              tag: tag(${SYNCER_IMAGE})
-            scheduling:
-              tolerations:
-                - operator: "Exists"
-          service:
-            spec:
-              type: NodePort
-          advanced:
-            serviceAccount:
-              enabled: false
-              name: default
-        telemetry:
-          enabled: false
 
 # Dev Configuration for vcluster
 dev:
@@ -138,24 +84,14 @@ dev:
 # Pipelines used for vcluster
 pipelines:
   dev:
-    flags:
-      - name: distro
-        description: "Virtual cluster distribution to use"
-        default: "k8s"
-        type: string
     run: |-
       # Deploy the vcluster
-      run_pipelines deploy --set-flag distro=$(get_flag distro)
+      run_pipelines deploy
 
       # Start dev mode
       start_dev --all
 
   deploy:
-    flags:
-      - name: distro
-        description: "Virtual cluster distribution to use"
-        default: "k8s"
-        type: string
     run: |-
       # Make sure pull secrets are there
       ensure_pull_secrets --all
@@ -163,14 +99,12 @@ pipelines:
       # Build the vcluster image
       build_images --all
 
-      # Deploy the vcluster
-      if is_equal $(get_flag distro) k8s; then
-        create_deployments vcluster-k8s
-      elif is_equal $(get_flag distro) k0s; then
-        create_deployments vcluster-k0s
-      else
-        create_deployments vcluster-k3s
+      if $(is_in "test-conformance" "${DEVSPACE_PROFILES}"); then
+        minikube image load $(get_image "vcluster") --overwrite=false || true
       fi
+
+      # Deploy the vcluster
+      create_deployments vcluster
 
   purge:
     run: |-
@@ -181,45 +115,40 @@ pipelines:
       kubectl delete pvc --all -n ${DEVSPACE_NAMESPACE}
 
 profiles:
-  - name: test-k3s
-    patches:
-      - op: add
-        path: deployments.vcluster-k3s.helm
-        value:
-          valuesFiles:
-            - ${COMMON_VALUES}
-            - ${VALUES_FILE}
-
   - name: test-k8s
     patches:
       - op: add
-        path: deployments.vcluster-k8s.helm
+        path: deployments.vcluster.helm
         value:
           valuesFiles:
             - ${COMMON_VALUES}
             - ${VALUES_FILE}
 
-  - name: test-k0s
-    patches:
-      - op: add
-        path: deployments.vcluster-k0s.helm
-        value:
-          valuesFiles:
-            - ${COMMON_VALUES}
-            - ${VALUES_FILE}
   - name: test-pro
     patches:
       - op: add
-        path: deployments.vcluster-k8s.helm
+        path: deployments.vcluster.helm
         value:
           valuesFiles:
             - ${COMMON_VALUES}
             - ${VALUES_FILE}
             - ${PRO_VALUES}
 
+  - name: test-conformance
+    patches:
+      - op: replace
+        path: images.vcluster.buildKit
+        value:
+          preferMinikube: false
+      - op: add
+        path: deployments.vcluster.helm
+        value:
+          valuesFiles:
+            - ${CONFORMANCE_VALUES}
+
 commands:
-  # e.g. devspace run test k3s
-  # e.g. devspace run test k3s --var VALUES_FILE=./test/e2e_node
+  # e.g. devspace run test k8s
+  # e.g. devspace run test k8s --var VALUES_FILE=./test/e2e_node
   test: |-
     devspace purge -n ${DEVSPACE_NAMESPACE} --debug
     devspace dev -n ${DEVSPACE_NAMESPACE} --profile test-$@

@@ -67,7 +67,7 @@ func WithRedirect(h http.Handler, registerCtx *synccontext.RegisterContext, unca
 				}
 			}
 
-			h, err := handler.Handler("", registerCtx.PhysicalManager.GetConfig(), nil)
+			h, err := handler.Handler("", registerCtx.HostManager.GetConfig(), nil)
 			if err != nil {
 				requestpkg.FailWithStatus(w, req, http.StatusInternalServerError, err)
 				return
@@ -98,18 +98,21 @@ func callAdmissionWebhooks(req *http.Request, info *request.RequestInfo, paramet
 				kind = corev1.SchemeGroupVersion.WithKind("PodExecOptions")
 				opts = &corev1.PodExecOptions{}
 				if err := parameterCodec.DecodeParameters(req.URL.Query(), corev1.SchemeGroupVersion, opts); err != nil {
+					klog.Infof("Error decoding exec parameters %s: %v", req.URL.Query(), err)
 					return err
 				}
 			} else if info.Subresource == "attach" {
 				kind = corev1.SchemeGroupVersion.WithKind("PodAttachOptions")
 				opts = &corev1.PodAttachOptions{}
 				if err := parameterCodec.DecodeParameters(req.URL.Query(), corev1.SchemeGroupVersion, opts); err != nil {
+					klog.Infof("Error decoding attach parameters %s: %v", req.URL.Query(), err)
 					return err
 				}
 			} else if info.Subresource == "portforward" {
 				kind = corev1.SchemeGroupVersion.WithKind("PodPortForwardOptions")
 				opts = &corev1.PodPortForwardOptions{}
 				if err := parameterCodec.DecodeParameters(req.URL.Query(), corev1.SchemeGroupVersion, opts); err != nil {
+					klog.Infof("Error decoding portforward parameters %s: %v", req.URL.Query(), err)
 					return err
 				}
 			}
@@ -117,8 +120,10 @@ func callAdmissionWebhooks(req *http.Request, info *request.RequestInfo, paramet
 			err := validatingAdmission.Validate(req.Context(), admission.NewAttributesRecord(opts, nil, kind, info.Namespace, info.Name, corev1.SchemeGroupVersion.WithResource(info.Resource), info.Subresource, admission.Connect, nil, false, userInfo), NewFakeObjectInterfaces(uncachedVirtualClient.Scheme(), uncachedVirtualClient.RESTMapper()))
 			if err != nil {
 				klog.Infof("Admission validate failed for %s: %v", info.Path, err)
-				return err
+				return kerrors.NewForbidden(corev1.SchemeGroupVersion.WithResource(info.Resource+"/"+info.Subresource).GroupResource(), info.Name, err)
 			}
+
+			klog.V(1).Info("Allowed pod request", "subresource", info.Subresource, "path", info.Path)
 		}
 	}
 

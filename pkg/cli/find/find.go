@@ -3,51 +3,67 @@ package find
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
+	clusterv1 "github.com/loft-sh/agentapi/v4/pkg/apis/loft/cluster/v1"
 	"github.com/loft-sh/log"
 	"github.com/loft-sh/log/survey"
 	"github.com/loft-sh/log/terminal"
+	vclusterconfig "github.com/loft-sh/vcluster/pkg/config"
+	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/platform"
+	"github.com/loft-sh/vcluster/pkg/platform/kube"
 	"github.com/loft-sh/vcluster/pkg/platform/sleepmode"
+	standaloneutil "github.com/loft-sh/vcluster/pkg/util/standalone"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/loft-sh/vcluster/pkg/constants"
+	storagev1 "github.com/loft-sh/api/v4/pkg/apis/storage/v1"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-const VirtualClusterSelector = "app=vcluster"
-
-var digitsOnlyRegex = regexp.MustCompile("^[0-9]+$")
+const (
+	NonDeletableAnnotation = "loft.sh/non-deletable"
+	VirtualClusterSelector = "app=vcluster"
+)
 
 type VCluster struct {
-	ClientFactory clientcmd.ClientConfig `json:"-"`
-	Created       metav1.Time
-	Name          string
-	Namespace     string
-	ServiceName   string
-	Annotations   map[string]string
-	Labels        map[string]string
-	Status        Status
-	Context       string
-	Version       string
+	ClientFactory          clientcmd.ClientConfig            `json:"-"`
+	Pods                   []corev1.Pod                      `json:"-"`
+	Deployment             *appsv1.Deployment                `json:"-"`
+	StatefulSet            *appsv1.StatefulSet               `json:"-"`
+	VirtualClusterInstance *storagev1.VirtualClusterInstance `json:"-"`
+	Created                metav1.Time
+	Name                   string
+	Namespace              string
+	ServiceName            string
+	Annotations            map[string]string
+	Labels                 map[string]string
+	Status                 Status
+	Context                string
+	Version                string
+	IsStandalone           bool
 }
 
 type Status string
 
 const (
-	StatusRunning Status = "Running"
-	StatusPaused  Status = "Paused"
-	StatusUnknown Status = "Unknown"
+	StatusRunning          Status = "Running"
+	StatusPaused           Status = "Paused"
+	StatusWorkloadSleeping Status = "Sleeping (workloads only)"
+	StatusScaledDown       Status = "ScaledDown"
+	StatusUnknown          Status = "Unknown"
 )
 
 type VClusterNotFoundError struct {
@@ -77,7 +93,7 @@ func CurrentContext() (string, *clientcmdapi.Config, error) {
 }
 
 func GetPlatformVCluster(ctx context.Context, platformClient platform.Client, name, project string, log log.Logger) (*platform.VirtualClusterInstanceProject, error) {
-	platformVClusters, err := platform.ListVClusters(ctx, platformClient, name, project)
+	platformVClusters, err := platform.ListVClusters(ctx, platformClient, name, project, false)
 	if err != nil {
 		log.Warnf("Error retrieving platform vclusters: %v", err)
 	}
@@ -181,6 +197,30 @@ func (v *VCluster) GetLabels() map[string]string {
 	return v.Labels
 }
 
+// HasPreventDeletionEnabled returns true if the virtual cluster has "Prevent Deletion" enabled in the platform, otherwise
+// it returns false.
+// This check works only when:
+//   - you are running vcluster CLI while connected to the host cluster where VirtualClusterInstance resource is available, or
+//   - for clusters that are created or updated with platform version 4.3.0 or newer.
+func (v *VCluster) HasPreventDeletionEnabled() bool {
+	if v.VirtualClusterInstance != nil {
+		// When the vcluster CLI has access to the VirtualClusterInstance resource, we check if the loft.sh/non-deletable
+		// annotation is set there.
+		// This check does not work when accessing the virtual cluster from a connected host cluster, because VirtualClusterInstance
+		// resource is not present on the connected host cluster.
+		if nonDeletable, ok := v.VirtualClusterInstance.Annotations[NonDeletableAnnotation]; ok && nonDeletable == "true" {
+			return true
+		}
+	}
+	// In cases when the vcluster CLI does not have access to the VirtualClusterInstance resource, we check if the
+	// loft.sh/non-deletable annotation is set on the vcluster StatefulSet/Deployment.
+	// This check works only if the virtual cluster is created or updated with a platform version 4.3.0 or newer.
+	if nonDeletable, ok := v.Annotations[NonDeletableAnnotation]; ok && nonDeletable == "true" {
+		return true
+	}
+	return false
+}
+
 func FormatOptions(format string, options [][]string) []string {
 	if len(options) == 0 {
 		return []string{}
@@ -222,16 +262,63 @@ func ListVClusters(ctx context.Context, context, name, namespace string, log log
 			return nil, err
 		}
 	}
+	kubeClient, err := CreateKubeClient(context)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kube client: %w", err)
+	}
 
-	ossVClusters, err := ListOSSVClusters(ctx, context, name, namespace)
+	vClusters, err := ListOSSVClusters(ctx, kubeClient, context, name, namespace)
 	if err != nil {
 		log.Warnf("Error retrieving vclusters: %v", err)
 	}
 
-	return ossVClusters, nil
+	// check if VirtualClusterInstances CRD exists
+	virtualClusterInstanceAvailable, err := isVirtualClusterInstanceResourceAvailable(kubeClient.Discovery())
+	if !virtualClusterInstanceAvailable {
+		// VirtualClusterInstances CRD not found. This usually the case with OSS vCluster.
+		if err != nil {
+			log.Warnf("Error when checking if VirtualClusterInstance resources are available: %v", err)
+		}
+		log.Debug("VirtualClusterInstance resources are not available on the server.")
+		return vClusters, nil
+	}
+
+	listOptions := metav1.ListOptions{}
+	if name != "" {
+		listOptions.FieldSelector = "metadata.name=" + name
+	}
+	// Find virtual cluster instances, so we can pair them with OSS virtual clusters.
+	virtualClusterInstancesList, err := kubeClient.Loft().StorageV1().VirtualClusterInstances("").List(ctx, listOptions)
+	if kerrors.IsForbidden(err) {
+		log.Debug("user does not have permission to list VirtualClusterInstances")
+		return vClusters, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to list virtual cluster instances: %w", err)
+	}
+	virtualClusterInstances := map[string]*storagev1.VirtualClusterInstance{}
+	for _, virtualClusterInstance := range virtualClusterInstancesList.Items {
+		vClusterNamespacedName := types.NamespacedName{
+			Namespace: virtualClusterInstance.Spec.ClusterRef.Namespace,
+			Name:      virtualClusterInstance.Spec.ClusterRef.VirtualCluster,
+		}.String()
+		virtualClusterInstances[vClusterNamespacedName] = &virtualClusterInstance
+	}
+
+	// Pair found VirtualClusterInstances with OSS virtual clusters.
+	for i := range vClusters {
+		namespacedName := types.NamespacedName{
+			Namespace: vClusters[i].Namespace,
+			Name:      vClusters[i].Name,
+		}.String()
+		if virtualClusterInstance, ok := virtualClusterInstances[namespacedName]; ok {
+			vClusters[i].VirtualClusterInstance = virtualClusterInstance
+		}
+	}
+
+	return vClusters, nil
 }
 
-func ListOSSVClusters(ctx context.Context, context, name, namespace string) ([]VCluster, error) {
+func ListOSSVClusters(ctx context.Context, kubeClient kube.Interface, context, name, namespace string) ([]VCluster, error) {
 	var err error
 
 	timeout := time.Minute
@@ -240,18 +327,24 @@ func ListOSSVClusters(ctx context.Context, context, name, namespace string) ([]V
 		timeout = time.Second * 5
 	}
 
-	vclusters, err := findInContext(ctx, context, name, namespace, timeout, false)
+	vclusters, err := findInContext(ctx, kubeClient, context, name, namespace, timeout)
 	if err != nil && vClusterName == "" {
 		return nil, errors.Wrap(err, "find vcluster")
 	}
 
 	if vClusterName != "" {
-		parentContextVClusters, err := findInContext(ctx, vClusterContext, name, namespace, time.Minute, true)
+		parentContextClient, err := CreateKubeClient(vClusterContext)
 		if err != nil {
-			return nil, errors.Wrap(err, "find vcluster")
-		}
+			logger := log.GetInstance()
+			logger.Warn("parent context unreachable - No vClusters listed from parent context")
+		} else {
+			parentContextVClusters, err := findInContext(ctx, parentContextClient, vClusterContext, name, namespace, time.Minute)
+			if err != nil {
+				return nil, errors.Wrap(err, "find vcluster")
+			}
 
-		vclusters = append(vclusters, parentContextVClusters...)
+			vclusters = append(vclusters, parentContextVClusters...)
+		}
 	}
 
 	return vclusters, nil
@@ -263,6 +356,20 @@ func VClusterContextName(vClusterName string, vClusterNamespace string, currentC
 
 func VClusterPlatformContextName(vClusterName string, projectName string, currentContext string) string {
 	return "vcluster-platform_" + vClusterName + "_" + projectName + "_" + currentContext
+}
+
+func VClusterDockerFromContext(originalContext string) (name string, context string) {
+	if !strings.HasPrefix(originalContext, "vcluster-docker_") {
+		return "", ""
+	}
+
+	splitted := strings.Split(originalContext, "_")
+	// vcluster-docker_<name>
+	if len(splitted) == 2 {
+		return splitted[1], ""
+	}
+
+	return "", ""
 }
 
 func VClusterPlatformFromContext(originalContext string) (name string, project string, context string) {
@@ -301,25 +408,9 @@ func VClusterFromContext(originalContext string) (name string, namespace string,
 	return originalContext, "", ""
 }
 
-func findInContext(ctx context.Context, context, name, namespace string, timeout time.Duration, isParentContext bool) ([]VCluster, error) {
+func findInContext(ctx context.Context, kubeClient kube.Interface, context, name, namespace string, timeout time.Duration) ([]VCluster, error) {
 	vclusters := []VCluster{}
-	kubeClientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{
-		CurrentContext: context,
-	})
-	restConfig, err := kubeClientConfig.ClientConfig()
-	if err != nil {
-		// we can ignore this error for parent context, it just means that the kubeconfig set doesn't have parent config in it.
-		if isParentContext {
-			logger := log.GetInstance()
-			logger.Warn("parent context unreachable - No vclusters listed from parent context")
-			return vclusters, nil
-		}
-		return nil, errors.Wrap(err, "load kube config")
-	}
-	kubeClient, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "create kube client")
-	}
+	kubeClientConfig := createKubeClientConfig(context)
 
 	// statefulset based vclusters
 	statefulSets, err := getStatefulSets(ctx, kubeClient, namespace, kubeClientConfig, timeout)
@@ -331,22 +422,13 @@ func findInContext(ctx context.Context, context, name, namespace string, timeout
 			if name != "" && name != release {
 				continue
 			}
-
-			if p.Spec.Replicas != nil && *p.Spec.Replicas == 0 && !isPaused(&p) {
-				// if the stateful set has been scaled down we'll ignore it -- this happens when
-				// using devspace to do vcluster plugin dev for example, devspace scales down the
-				// vcluster stateful set and re-creates a deployment for "dev mode" so we end up
-				// with a duplicate vcluster in the list, one for the statefulset and one for the
-				// deployment. Of course if the vcluster is paused (via `vcluster pause`), we *do*
-				// still need to care about it even if replicas == 0.
-
-				continue
-			}
-
 			vCluster, err := getVCluster(ctx, &p, context, release, kubeClient, kubeClientConfig)
 			if err != nil {
-				return nil, err
+				logger := log.GetInstance()
+				logger.Debugf("Error getting vCluster %s: %v", release, err)
+				continue
 			}
+			vCluster.StatefulSet = &p
 			vCluster.Context = context
 			vclusters = append(vclusters, vCluster)
 		}
@@ -363,11 +445,14 @@ func findInContext(ctx context.Context, context, name, namespace string, timeout
 				continue
 			}
 
-			vCluster, err2 := getVCluster(ctx, &p, context, release, kubeClient, kubeClientConfig)
-			if err2 != nil {
-				return nil, err2
+			vCluster, err := getVCluster(ctx, &p, context, release, kubeClient, kubeClientConfig)
+			if err != nil {
+				logger := log.GetInstance()
+				logger.Debugf("Error getting vCluster %s: %v", release, err)
+				continue
 			}
 
+			vCluster.Deployment = &p
 			vCluster.Context = context
 			vclusters = append(vclusters, vCluster)
 		}
@@ -376,35 +461,46 @@ func findInContext(ctx context.Context, context, name, namespace string, timeout
 	return vclusters, nil
 }
 
-func getVCluster(ctx context.Context, object client.Object, context, release string, client *kubernetes.Clientset, kubeClientConfig clientcmd.ClientConfig) (VCluster, error) {
+func getVCluster(ctx context.Context, object client.Object, context, release string, client kube.Interface, kubeClientConfig clientcmd.ClientConfig) (VCluster, error) {
 	namespace := object.GetNamespace()
 	created := object.GetCreationTimestamp()
 	releaseName := ""
 	status := ""
 	version := ""
+	var pods []corev1.Pod
 
-	if object.GetAnnotations() != nil && object.GetAnnotations()[constants.PausedAnnotation] == "true" {
+	if object.GetAnnotations()[constants.PausedAnnotation(false)] == "true" ||
+		object.GetLabels()[sleepmode.Label] == "true" {
 		status = string(StatusPaused)
 	} else {
 		releaseName = "release=" + release
 	}
 
 	if status == "" {
-		pods, err := getPods(ctx, client, kubeClientConfig, namespace, releaseName)
+		// Workload sleepmode cannot modify/annotate the VirtualClusterInstance, StatefulSet, or Deployment so it
+		// sets a sleep type on the config secret.  Check that here.
+		sec, err := getConfigSecret(ctx, client, kubeClientConfig, namespace, release)
+		if err == nil {
+			if _, ok := sec.Annotations[clusterv1.SleepModeSleepTypeAnnotation]; ok {
+				status = string(StatusWorkloadSleeping)
+			}
+		}
+	}
+
+	if status == "" {
+		podList, err := getPods(ctx, client, kubeClientConfig, namespace, releaseName)
 		if err != nil {
 			return VCluster{}, err
 		}
-		for _, pod := range pods.Items {
-			status = GetPodStatus(&pod)
-		}
-	}
-	if status == "" {
-		status = string(StatusUnknown)
-	}
+		pods = podList.Items
 
-	service, err := getService(ctx, client, kubeClientConfig, namespace, release)
-	if err != nil {
-		return VCluster{}, err
+		if len(podList.Items) > 0 {
+			for _, pod := range podList.Items {
+				status = GetPodStatus(&pod)
+			}
+		} else if isScaledDown(object) {
+			status = string(StatusScaledDown)
+		}
 	}
 
 	switch vclusterObject := object.(type) {
@@ -433,7 +529,6 @@ func getVCluster(ctx context.Context, object client.Object, context, release str
 	return VCluster{
 		Name:          release,
 		Namespace:     namespace,
-		ServiceName:   service.Name,
 		Annotations:   object.GetAnnotations(),
 		Labels:        object.GetLabels(),
 		Status:        Status(status),
@@ -441,36 +536,11 @@ func getVCluster(ctx context.Context, object client.Object, context, release str
 		Context:       context,
 		Version:       version,
 		ClientFactory: kubeClientConfig,
+		Pods:          pods,
 	}, nil
 }
 
-func getService(ctx context.Context, client *kubernetes.Clientset, kubeClientConfig clientcmd.ClientConfig, namespace, name string) (*corev1.Service, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
-	defer cancel()
-
-	var svcName string
-	if digitsOnlyRegex.MatchString(name) {
-		svcName = fmt.Sprintf("vc-%s", name)
-	} else {
-		svcName = name
-	}
-
-	service, err := client.CoreV1().Services(namespace).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		if kerrors.IsForbidden(err) {
-			// try the current namespace instead
-			if namespace, err = getAccessibleNS(kubeClientConfig); err != nil {
-				return nil, err
-			}
-			return client.CoreV1().Services(namespace).Get(ctx, svcName, metav1.GetOptions{})
-		}
-		return nil, err
-	}
-
-	return service, nil
-}
-
-func getPods(ctx context.Context, client *kubernetes.Clientset, kubeClientConfig clientcmd.ClientConfig, namespace, podSelector string) (*corev1.PodList, error) {
+func getPods(ctx context.Context, client kube.Interface, kubeClientConfig clientcmd.ClientConfig, namespace, podSelector string) (*corev1.PodList, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
 
@@ -492,7 +562,25 @@ func getPods(ctx context.Context, client *kubernetes.Clientset, kubeClientConfig
 	return podList, nil
 }
 
-func getDeployments(ctx context.Context, client *kubernetes.Clientset, namespace string, kubeClientConfig clientcmd.ClientConfig, timeout time.Duration) (*appsv1.DeploymentList, error) {
+func getConfigSecret(ctx context.Context, client kube.Interface, kubeClientConfig clientcmd.ClientConfig, namespace, releaseName string) (*corev1.Secret, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+
+	secret, err := client.CoreV1().Secrets(namespace).Get(ctx, "vc-config-"+releaseName, metav1.GetOptions{})
+	if err != nil {
+		if kerrors.IsForbidden(err) {
+			// try the current namespace instead
+			if namespace, err = getAccessibleNS(kubeClientConfig); err != nil {
+				return nil, err
+			}
+			return client.CoreV1().Secrets(namespace).Get(ctx, releaseName, metav1.GetOptions{})
+		}
+		return nil, err
+	}
+	return secret, nil
+}
+
+func getDeployments(ctx context.Context, client kube.Interface, namespace string, kubeClientConfig clientcmd.ClientConfig, timeout time.Duration) (*appsv1.DeploymentList, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -514,7 +602,7 @@ func getDeployments(ctx context.Context, client *kubernetes.Clientset, namespace
 	return deploymentList, nil
 }
 
-func getStatefulSets(ctx context.Context, client *kubernetes.Clientset, namespace string, kubeClientConfig clientcmd.ClientConfig, timeout time.Duration) (*appsv1.StatefulSetList, error) {
+func getStatefulSets(ctx context.Context, client kube.Interface, namespace string, kubeClientConfig clientcmd.ClientConfig, timeout time.Duration) (*appsv1.StatefulSetList, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -611,9 +699,83 @@ func GetPodStatus(pod *corev1.Pod) string {
 	return reason
 }
 
-func isPaused(v client.Object) bool {
-	annotations := v.GetAnnotations()
-	labels := v.GetLabels()
+// isScaledDown returns true if the workload's desired replica count is 0.
+// This distinguishes an intentional scale-down from a transient state where
+// pods are temporarily absent (e.g., during startup or rollout).
+func isScaledDown(object client.Object) bool {
+	switch o := object.(type) {
+	case *appsv1.StatefulSet:
+		return o.Spec.Replicas != nil && *o.Spec.Replicas == 0
+	case *appsv1.Deployment:
+		return o.Spec.Replicas != nil && *o.Spec.Replicas == 0
+	}
+	return false
+}
 
-	return annotations[constants.PausedAnnotation] == "true" || labels[sleepmode.Label] == "true"
+// GetStandaloneVCluster returns a vCluster for a standalone installation on the
+// current host. Detection relies on the systemd service file existing on the
+// local filesystem, so this only works when the CLI runs on the same host as
+// the vCluster standalone. Returns nil, nil when standalone is not detected.
+func GetStandaloneVCluster() (*VCluster, error) {
+	unitData, found, err := standaloneutil.DetectStandaloneHost()
+	if err != nil {
+		return nil, fmt.Errorf("detect standalone host: %w", err)
+	}
+	if !found {
+		//nolint:nilnil
+		return nil, nil
+	}
+
+	vConfig, err := vclusterconfig.LoadStandaloneConfig("", nil)
+	if err != nil {
+		return nil, fmt.Errorf("load standalone config: %w", err)
+	}
+	kubeClientConfig, err := getStandaloneKubeClientConfig(vConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	version := standaloneutil.ParseEnvFromSystemdUnit(unitData, "VCLUSTER_VERSION")
+
+	// Use the systemd unit file's modification time as a proxy for cluster creation time.
+	fi, err := os.Stat(constants.VClusterStandaloneSystemdUnitFile)
+	if err != nil {
+		return nil, fmt.Errorf("stat standalone unit file: %w", err)
+	}
+	created := metav1.NewTime(fi.ModTime())
+
+	// Check if the systemd service is actually running.
+	status := StatusUnknown
+	out, err := exec.Command("systemctl", "is-active", constants.VClusterStandaloneSystemdServiceName).Output()
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		status = StatusRunning
+	}
+
+	return &VCluster{
+		Name:          vConfig.Name,
+		Namespace:     constants.VClusterStandaloneSnapshotNamespace,
+		ClientFactory: kubeClientConfig,
+		Created:       created,
+		Version:       version,
+		Status:        status,
+		IsStandalone:  true,
+	}, nil
+}
+
+// isVirtualClusterInstanceResourceAvailable checks if VirtualClusterInstance resources from storage.loft.sh/v1 exist
+// on the server.
+func isVirtualClusterInstanceResourceAvailable(discoveryClient discovery.DiscoveryInterface) (bool, error) {
+	resources, err := discoveryClient.ServerResourcesForGroupVersion(storagev1.SchemeGroupVersion.String())
+	if kerrors.IsNotFound(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("failed to retrieve server resources for group/version '%s': %w", storagev1.GroupVersion.String(), err)
+	}
+
+	for _, resource := range resources.APIResources {
+		if strings.ToLower(resource.Name) == "virtualclusterinstances" {
+			return true, nil
+		}
+	}
+	return false, nil
 }

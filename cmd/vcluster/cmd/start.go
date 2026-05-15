@@ -6,6 +6,8 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/loft-sh/log"
+	"github.com/loft-sh/vcluster/pkg/cli/find"
 	"github.com/loft-sh/vcluster/pkg/config"
 	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/integrations"
@@ -14,11 +16,14 @@ import (
 	"github.com/loft-sh/vcluster/pkg/pro"
 	"github.com/loft-sh/vcluster/pkg/scheme"
 	"github.com/loft-sh/vcluster/pkg/setup"
+	setupconfig "github.com/loft-sh/vcluster/pkg/setup/config"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	"github.com/loft-sh/vcluster/pkg/telemetry"
+	"github.com/loft-sh/vcluster/pkg/util/osutil"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 )
 
 type StartOptions struct {
@@ -31,7 +36,7 @@ func NewStartCommand() *cobra.Command {
 	startOptions := &StartOptions{}
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Execute the vcluster",
+		Short: "Start a vCluster",
 		Args:  cobra.NoArgs,
 		RunE: func(cobraCmd *cobra.Command, _ []string) (err error) {
 			// execute command
@@ -48,20 +53,33 @@ func NewStartCommand() *cobra.Command {
 }
 
 func ExecuteStart(ctx context.Context, options *StartOptions) error {
-	// parse vCluster config
-	vConfig, err := config.ParseConfig(options.Config, os.Getenv("VCLUSTER_NAME"), options.SetValues)
+	klog.FromContext(ctx).Info("vCluster version", "version", telemetry.SyncerVersion)
+	if os.Getenv("POD_NAME") == "" && os.Getenv("POD_NAMESPACE") == "" {
+		return pro.StartStandalone(ctx, &pro.StandaloneOptions{
+			Config: options.Config,
+		})
+	}
+
+	return StartInCluster(ctx, options)
+}
+
+// StartInCluster is invoked when running in a container
+func StartInCluster(ctx context.Context, options *StartOptions) error {
+	vClusterName := os.Getenv("VCLUSTER_NAME")
+	// load vCluster config
+	vConfig, err := config.LoadInClusterConfig(vClusterName, options.Config, options.SetValues)
 	if err != nil {
 		return err
 	}
 
 	// get current namespace
-	vConfig.ControlPlaneConfig, vConfig.ControlPlaneNamespace, vConfig.ControlPlaneService, vConfig.WorkloadConfig, vConfig.WorkloadNamespace, vConfig.WorkloadService, err = pro.GetRemoteClient(vConfig)
+	vConfig.HostConfig, vConfig.HostNamespace, err = setupconfig.InitClientConfig()
 	if err != nil {
 		return err
 	}
 
 	// init config
-	err = setup.InitAndValidateConfig(ctx, vConfig)
+	err = setupconfig.InitAndValidateConfig(ctx, vConfig)
 	if err != nil {
 		return err
 	}
@@ -74,25 +92,32 @@ func ExecuteStart(ctx context.Context, options *StartOptions) error {
 	defer func() {
 		if r := recover(); r != nil {
 			telemetry.CollectorControlPlane.RecordError(ctx, vConfig, telemetry.PanicSeverity, fmt.Errorf("panic: %v %s", r, string(debug.Stack())))
-			panic(r)
+			klog.Errorf("panic: %v %s", r, string(debug.Stack()))
+			osutil.Exit(1)
 		} else if err != nil {
 			telemetry.CollectorControlPlane.RecordError(ctx, vConfig, telemetry.FatalSeverity, err)
 		}
 	}()
 
 	// initialize feature gate from environment
-	err = pro.LicenseInit(ctx, vConfig)
-	if err != nil {
-		return fmt.Errorf("init license: %w", err)
+	if err := pro.LicenseInit(ctx, vConfig); err != nil {
+		return fmt.Errorf("license init: %w", err)
 	}
 
-	// set features for plugins to recognize
-	plugin.DefaultManager.SetProFeatures(pro.LicenseFeatures())
+	logger := log.GetInstance()
 
-	// connect to vCluster platform if configured
-	startPlatformServersAndControllers, err := pro.ConnectToPlatform(ctx, vConfig)
+	// check if there are existing vClusters in the current namespace
+	vClusters, err := find.ListVClusters(ctx, "", "", vConfig.HostNamespace, logger)
 	if err != nil {
-		return fmt.Errorf("connect to platform: %w", err)
+		return err
+	}
+
+	// from v0.25 onwards, creation of multiple vClusters inside the same ns is not allowed
+	for _, v := range vClusters {
+		if v.Namespace == vConfig.HostNamespace && v.Name != vClusterName {
+			return fmt.Errorf("there is already a virtual cluster in namespace %s; "+
+				"creating multiple virtual clusters inside the same namespace is not supported", vConfig.HostNamespace)
+		}
 	}
 
 	err = setup.Initialize(ctx, vConfig)
@@ -100,15 +125,19 @@ func ExecuteStart(ctx context.Context, options *StartOptions) error {
 		return fmt.Errorf("initialize: %w", err)
 	}
 
+	// set features for plugins to recognize
+	plugin.DefaultManager.SetProFeatures(pro.LicenseFeatures())
+
 	// build controller context
 	controllerCtx, err := setup.NewControllerContext(ctx, vConfig)
 	if err != nil {
 		return fmt.Errorf("create controller context: %w", err)
 	}
 
-	err = startPlatformServersAndControllers(controllerCtx.VirtualManager)
+	// start license loader
+	err = pro.LicenseStart(controllerCtx)
 	if err != nil {
-		return fmt.Errorf("start platform controllers: %w", err)
+		return fmt.Errorf("start license loader: %w", err)
 	}
 
 	// start integrations
@@ -129,10 +158,16 @@ func ExecuteStart(ctx context.Context, options *StartOptions) error {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 
+	// start konnectivity server
+	err = pro.StartKonnectivity(controllerCtx)
+	if err != nil {
+		return fmt.Errorf("start konnectivity: %w", err)
+	}
+
 	// should start embedded coredns?
 	if vConfig.ControlPlane.CoreDNS.Embedded {
 		// write vCluster kubeconfig to /data/vcluster/admin.conf
-		err = clientcmd.WriteToFile(*controllerCtx.VirtualRawConfig, "/data/vcluster/admin.conf")
+		err = clientcmd.WriteToFile(*controllerCtx.VirtualRawConfig, constants.EmbeddedCoreDNSAdminConf)
 		if err != nil {
 			return fmt.Errorf("write vCluster kube config for embedded coredns: %w", err)
 		}
@@ -141,6 +176,20 @@ func ExecuteStart(ctx context.Context, options *StartOptions) error {
 		err = pro.StartIntegratedCoreDNS(controllerCtx)
 		if err != nil {
 			return fmt.Errorf("start integrated core dns: %w", err)
+		}
+	}
+
+	// start embedded kube-vip
+	if vConfig.ControlPlane.Advanced.KubeVip.Enabled {
+		if err := pro.StartEmbeddedKubeVip(controllerCtx, vConfig); err != nil {
+			return fmt.Errorf("start embedded kube-vip: %w", err)
+		}
+	}
+
+	// Check if any proxy resources are enabled
+	if len(vConfig.Experimental.Proxy.CustomResources) > 0 {
+		if err := pro.StartCustomResourceProxy(controllerCtx, vConfig); err != nil {
+			return fmt.Errorf("start resource proxy: %w", err)
 		}
 	}
 

@@ -7,11 +7,13 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/ghodss/yaml"
 	managementv1 "github.com/loft-sh/api/v4/pkg/apis/management/v1"
 	"github.com/loft-sh/log"
 	"github.com/loft-sh/vcluster/pkg/cli/find"
 	"github.com/loft-sh/vcluster/pkg/cli/flags"
 	"github.com/loft-sh/vcluster/pkg/cli/localkubernetes"
+	"github.com/loft-sh/vcluster/pkg/coredns"
 	"github.com/loft-sh/vcluster/pkg/helm"
 	"github.com/loft-sh/vcluster/pkg/platform"
 	"github.com/loft-sh/vcluster/pkg/util/clihelper"
@@ -20,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -50,7 +53,7 @@ type deleteHelm struct {
 	log log.Logger
 }
 
-func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.GlobalFlags, vClusterName string, log log.Logger) error {
+func DeleteHelm(ctx context.Context, platformClient platform.Client, options *DeleteOptions, globalFlags *flags.GlobalFlags, vClusterName string, log log.Logger) error {
 	cmd := deleteHelm{
 		GlobalFlags:   globalFlags,
 		DeleteOptions: options,
@@ -72,10 +75,23 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 		return nil
 	}
 
+	// Check if vCluster is created via platform and has deletion prevention enabled
+	if vCluster.HasPreventDeletionEnabled() {
+		return fmt.Errorf("deletion of virtual cluster %s is prevented, disable \"Prevent Deletion\" via platform in order to delete this virtual cluster", vClusterName)
+	}
+
 	// prepare client
 	err = cmd.prepare(vCluster)
 	if err != nil {
 		return err
+	}
+
+	if platformClient != nil {
+		cmd.log.Debugf("deleting vcluster in platform")
+		err = cmd.deleteVClusterInPlatform(ctx, platformClient, vClusterName)
+		if err != nil {
+			return fmt.Errorf("deleting vcluster in platform failed: %w", err)
+		}
 	}
 
 	// test for helm
@@ -84,7 +100,7 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 		return err
 	}
 
-	output, err := exec.Command(helmBinaryPath, "version", "--client", "--template", "{{.Version}}").Output()
+	output, err := exec.Command(helmBinaryPath, "version", "--template", "{{.Version}}").Output()
 	if err != nil {
 		return err
 	}
@@ -104,29 +120,37 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 		}
 	}
 
-	// get service uid
-	vClusterService, err := cmd.kubeClient.CoreV1().Services(cmd.Namespace).Get(ctx, vClusterName, metav1.GetOptions{})
-	if err != nil && !kerrors.IsNotFound(err) {
-		return fmt.Errorf("error retrieving vcluster service: %w", err)
+	helmClient := helm.NewClient(cmd.rawConfig, cmd.log, helmBinaryPath)
+	// before removing vCluster release, we need to get the config from values for later use
+	values, err := helmClient.GetValues(ctx, vClusterName, cmd.Namespace, true)
+	if err != nil {
+		return err
+	}
+
+	var configValues map[string]any
+	namespacesSyncEnabled := false
+	if err := yaml.Unmarshal(values, &configValues); err != nil {
+		cmd.log.Debugf("Error parsing vcluster config from Helm values: %v. Namespace sync will be disabled", err)
+	} else {
+		enabled, isFound, err := unstructured.NestedBool(configValues, "sync", "toHost", "namespaces", "enabled")
+		if err != nil {
+			cmd.log.Debugf("Error getting namespace sync enabled flag: %v. Namespace sync will be disabled", err)
+		} else if isFound {
+			namespacesSyncEnabled = enabled
+		}
 	}
 
 	// we have to delete the chart
 	cmd.log.Infof("Delete vcluster %s...", vClusterName)
-	err = helm.NewClient(cmd.rawConfig, cmd.log, helmBinaryPath).Delete(vClusterName, cmd.Namespace)
+	err = helmClient.Delete(vClusterName, cmd.Namespace)
 	if err != nil {
 		return err
 	}
 	cmd.log.Donef("Successfully deleted virtual cluster %s in namespace %s", vClusterName, cmd.Namespace)
 
-	// try to delete the vCluster in the platform
-	if vClusterService != nil {
-		cmd.log.Debugf("deleting vcluster in platform")
-		err = cmd.deleteVClusterInPlatform(ctx, vClusterService)
-		if err != nil {
-			return err
-		}
-	} else {
-		cmd.log.Warn("vcluster service not found, could not delete in platform")
+	// delete priorityclasses
+	if err = deletePriorityClasses(ctx, cmd, vClusterName); err != nil {
+		return err
 	}
 
 	// try to delete the pvc
@@ -168,6 +192,13 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 		}
 	}
 
+	// delete coreDNS components since they're separately deployed and not with the vCluster helm chart
+	err = coredns.DeleteCoreDNSComponents(ctx, cmd.kubeClient, cmd.Namespace)
+	cmd.log.Info("Deleting CoreDNS components...")
+	if err != nil {
+		cmd.log.Warnf("delete coreDNS components: %v", err)
+	}
+
 	// check if there are any other vclusters in the namespace you are deleting vcluster in.
 	vClusters, err := find.ListVClusters(ctx, cmd.Context, "", cmd.Namespace, cmd.log)
 	if err != nil {
@@ -178,7 +209,14 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 		cmd.DeleteNamespace = false
 	}
 
-	// try to delete the namespace
+	// if namespace sync is enabled, use cleanup handlers to handle namespace cleanup
+	if namespacesSyncEnabled {
+		if err := CleanupSyncedNamespaces(ctx, cmd.Namespace, vClusterName, cmd.restConfig, cmd.kubeClient, cmd.log); err != nil {
+			return fmt.Errorf("run namespace cleanup: %w", err)
+		}
+	}
+
+	// check if we should cleanup vCluster host namespace
 	if cmd.DeleteNamespace {
 		// delete namespace
 		err = cmd.kubeClient.CoreV1().Namespaces().Delete(ctx, cmd.Namespace, metav1.DeleteOptions{})
@@ -190,29 +228,7 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 			cmd.log.Donef("Successfully deleted virtual cluster namespace %s", cmd.Namespace)
 		}
 
-		// delete multi namespace mode namespaces
-		namespaces, err := cmd.kubeClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
-			LabelSelector: translate.MarkerLabel + "=" + translate.SafeConcatName(cmd.Namespace, "x", vClusterName),
-		})
-		if err != nil && !kerrors.IsForbidden(err) {
-			return fmt.Errorf("list namespaces: %w", err)
-		}
-
-		// delete all namespaces
-		if namespaces != nil && len(namespaces.Items) > 0 {
-			for _, namespace := range namespaces.Items {
-				err = cmd.kubeClient.CoreV1().Namespaces().Delete(ctx, namespace.Name, metav1.DeleteOptions{})
-				if err != nil {
-					if !kerrors.IsNotFound(err) {
-						return fmt.Errorf("delete namespace: %w", err)
-					}
-				} else {
-					cmd.log.Donef("Successfully deleted virtual cluster namespace %s", namespace.Name)
-				}
-			}
-		}
-
-		// wait for vcluster deletion
+		// wait for namespace deletion
 		if cmd.Wait {
 			cmd.log.Info("Waiting for virtual cluster to be deleted...")
 			for {
@@ -230,13 +246,7 @@ func DeleteHelm(ctx context.Context, options *DeleteOptions, globalFlags *flags.
 	return nil
 }
 
-func (cmd *deleteHelm) deleteVClusterInPlatform(ctx context.Context, vClusterService *corev1.Service) error {
-	platformClient, err := platform.InitClientFromConfig(ctx, cmd.LoadedConfig(cmd.log))
-	if err != nil {
-		cmd.log.Debugf("Error creating platform client: %v", err)
-		return nil
-	}
-
+func (cmd *deleteHelm) deleteVClusterInPlatform(ctx context.Context, platformClient platform.Client, vClusterName string) error {
 	managementClient, err := platformClient.Management()
 	if err != nil {
 		cmd.log.Debugf("Error creating management client: %v", err)
@@ -249,7 +259,16 @@ func (cmd *deleteHelm) deleteVClusterInPlatform(ctx context.Context, vClusterSer
 		return nil
 	}
 
-	toDelete := []managementv1.VirtualClusterInstance{}
+	// get service uid
+	vClusterService, err := cmd.kubeClient.CoreV1().Services(cmd.Namespace).Get(ctx, vClusterName, metav1.GetOptions{})
+	if err != nil && !kerrors.IsNotFound(err) {
+		return fmt.Errorf("error retrieving vcluster service: %w", err)
+	} else if kerrors.IsNotFound(err) {
+		cmd.log.Warn("vcluster service not found, could not delete in platform")
+		return nil
+	}
+
+	var toDelete []managementv1.VirtualClusterInstance
 	for _, virtualClusterInstance := range virtualClusterInstances.Items {
 		if virtualClusterInstance.Status.ServiceUID != "" && virtualClusterInstance.Status.ServiceUID == string(vClusterService.UID) {
 			toDelete = append(toDelete, virtualClusterInstance)
@@ -283,11 +302,6 @@ func (cmd *deleteHelm) prepare(vCluster *find.VCluster) error {
 	restConfig, err := vCluster.ClientFactory.ClientConfig()
 	if err != nil {
 		return err
-	}
-
-	err = localkubernetes.CleanupLocal(vCluster.Name, vCluster.Namespace, &rawConfig, cmd.log)
-	if err != nil {
-		cmd.log.Warnf("error cleaning up: %v", err)
 	}
 
 	// construct proxy name
@@ -364,4 +378,24 @@ func deleteContext(kubeConfig *clientcmdapi.Config, kubeContext string, otherCon
 	}
 
 	return clientcmd.ModifyConfig(clientcmd.NewDefaultClientConfigLoadingRules(), *kubeConfig, false)
+}
+
+func deletePriorityClasses(ctx context.Context, cmd deleteHelm, vClusterName string) error {
+	priorityClasses, err := cmd.kubeClient.SchedulingV1().PriorityClasses().List(ctx, metav1.ListOptions{
+		LabelSelector: translate.MarkerLabel + "=" + translate.SafeConcatName(cmd.Namespace, "x", vClusterName),
+	})
+	if err != nil && !kerrors.IsForbidden(err) {
+		return fmt.Errorf("list priorityClasses: %w", err)
+	}
+
+	if priorityClasses != nil && len(priorityClasses.Items) > 0 {
+		for _, pc := range priorityClasses.Items {
+			err = cmd.kubeClient.SchedulingV1().PriorityClasses().Delete(ctx, pc.Name, metav1.DeleteOptions{})
+			if err != nil && !kerrors.IsNotFound(err) {
+				return fmt.Errorf("delete priorityClass: %w", err)
+			}
+		}
+	}
+
+	return nil
 }

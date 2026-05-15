@@ -7,25 +7,31 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/loft-sh/vcluster/pkg/platform/defaults"
-	"github.com/mitchellh/go-homedir"
-
 	"github.com/loft-sh/log"
-	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/convert"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/certs"
 	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/credits"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/debug"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/node"
 	cmdplatform "github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/platform"
 	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/platform/set"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/registry"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/snapshot"
 	cmdtelemetry "github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/telemetry"
+	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/token"
 	"github.com/loft-sh/vcluster/cmd/vclusterctl/cmd/use"
 	"github.com/loft-sh/vcluster/pkg/cli/completion"
 	"github.com/loft-sh/vcluster/pkg/cli/config"
 	"github.com/loft-sh/vcluster/pkg/cli/flags"
 	"github.com/loft-sh/vcluster/pkg/platform"
+	"github.com/loft-sh/vcluster/pkg/platform/defaults"
 	"github.com/loft-sh/vcluster/pkg/telemetry"
 	"github.com/loft-sh/vcluster/pkg/upgrade"
+	"github.com/mitchellh/go-homedir"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
+
+const compCmdName = "completion"
 
 // NewRootCmd returns a new root command
 func NewRootCmd(log log.Logger) *cobra.Command {
@@ -34,7 +40,7 @@ func NewRootCmd(log log.Logger) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "Welcome to vcluster!",
-		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+		PersistentPreRunE: func(cobraCmd *cobra.Command, _ []string) error {
 			if globalFlags == nil {
 				return errors.New("nil globalFlags")
 			}
@@ -47,8 +53,10 @@ func NewRootCmd(log log.Logger) *cobra.Command {
 				}
 			}
 
-			// start telemetry
-			telemetry.StartCLI(globalFlags.LoadedConfig(log))
+			// start telemetry — skip for completion commands
+			if !isCompletionCommand(cobraCmd) {
+				telemetry.StartCLI(globalFlags.LoadedConfig(log))
+			}
 
 			if globalFlags.Silent {
 				log.SetLevel(logrus.FatalLevel)
@@ -122,12 +130,18 @@ func BuildRoot(log log.Logger) (*cobra.Command, *flags.GlobalFlags, error) {
 	rootCmd.AddCommand(NewResumeCmd(globalFlags))
 	rootCmd.AddCommand(NewDisconnectCmd(globalFlags))
 	rootCmd.AddCommand(NewUpgradeCmd())
+	rootCmd.AddCommand(snapshot.NewSnapshot(globalFlags))
+	rootCmd.AddCommand(NewRestore(globalFlags))
 	rootCmd.AddCommand(use.NewUseCmd(globalFlags))
-	rootCmd.AddCommand(convert.NewConvertCmd(globalFlags))
+	rootCmd.AddCommand(debug.NewDebugCommand(globalFlags))
 	rootCmd.AddCommand(cmdtelemetry.NewTelemetryCmd(globalFlags))
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(NewInfoCmd(globalFlags))
 	rootCmd.AddCommand(set.NewSetCmd(globalFlags, defaults))
+	rootCmd.AddCommand(token.NewTokenCmd(globalFlags))
+	rootCmd.AddCommand(node.NewNodeCmd(globalFlags))
+	rootCmd.AddCommand(registry.NewRegistryCmd(globalFlags))
+	rootCmd.AddCommand(certs.NewCertsCmd(globalFlags))
 
 	// add platform commands
 	platformCmd, err := cmdplatform.NewPlatformCmd(globalFlags)
@@ -171,4 +185,17 @@ func recordAndFlush(err error, log log.Logger, globalFlags *flags.GlobalFlags) {
 
 	telemetry.CollectorCLI.RecordCLI(globalFlags.LoadedConfig(log), platform.Self, err)
 	telemetry.CollectorCLI.Flush()
+}
+
+func isCompletionCommand(cmd *cobra.Command) bool {
+	name := cmd.Name()
+	if name == cobra.ShellCompRequestCmd || name == cobra.ShellCompNoDescRequestCmd {
+		return true
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == compCmdName {
+			return true
+		}
+	}
+	return false
 }

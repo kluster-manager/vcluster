@@ -6,6 +6,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/mappings"
 	"github.com/loft-sh/vcluster/pkg/mappings/resources"
 	"github.com/loft-sh/vcluster/pkg/patcher"
+	"github.com/loft-sh/vcluster/pkg/pro"
 	"github.com/loft-sh/vcluster/pkg/syncer"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
@@ -25,15 +26,11 @@ func New(ctx *synccontext.RegisterContext) (syncertypes.Object, error) {
 
 	return &eventSyncer{
 		Mapper: mapper,
-
-		hostClient: ctx.PhysicalManager.GetClient(),
 	}, nil
 }
 
 type eventSyncer struct {
 	synccontext.Mapper
-
-	hostClient client.Client
 }
 
 func (s *eventSyncer) Resource() client.Object {
@@ -47,7 +44,7 @@ func (s *eventSyncer) Name() string {
 var _ syncertypes.Syncer = &eventSyncer{}
 
 func (s *eventSyncer) Syncer() syncertypes.Sync[client.Object] {
-	return syncer.ToGenericSyncer[*corev1.Event](s)
+	return syncer.ToGenericSyncer(s)
 }
 
 var _ syncertypes.OptionsProvider = &eventSyncer{}
@@ -58,18 +55,13 @@ func (s *eventSyncer) Options() *syncertypes.Options {
 	}
 }
 
-func (s *eventSyncer) SyncToHost(ctx *synccontext.SyncContext, event *synccontext.SyncToHostEvent[*corev1.Event]) (ctrl.Result, error) {
-	// check if delete event
-	if event.IsDelete() {
-		return syncer.DeleteVirtualObject(ctx, event.Virtual, "host event was deleted")
-	}
-
+func (s *eventSyncer) SyncToHost(_ *synccontext.SyncContext, _ *synccontext.SyncToHostEvent[*corev1.Event]) (ctrl.Result, error) {
 	// just ignore, Kubernetes will clean them up
 	return ctrl.Result{}, nil
 }
 
 func (s *eventSyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncEvent[*corev1.Event]) (_ ctrl.Result, retErr error) {
-	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual)
+	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual, patcher.TranslatePatches(ctx.Config.Sync.FromHost.Events.Patches, true))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("new syncer patcher: %w", err)
 	}
@@ -95,6 +87,12 @@ func (s *eventSyncer) SyncToVirtual(ctx *synccontext.SyncContext, event *synccon
 	err := s.translateEvent(ctx, event.Host, vObj)
 	if err != nil {
 		return ctrl.Result{}, resources.IgnoreAcceptableErrors(err)
+	}
+
+	// Apply pro patches
+	err = pro.ApplyPatchesVirtualObject(ctx, nil, vObj, event.Host, ctx.Config.Sync.FromHost.Events.Patches, true)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error applying patches: %w", err)
 	}
 
 	// make sure namespace is not being deleted

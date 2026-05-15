@@ -25,6 +25,7 @@ const (
 	SleepModeSleepTypeAnnotation         = "sleepmode.loft.sh/sleep-type"
 	SleepModeDisableIngressWakeup        = "sleepmode.loft.sh/disable-ingress-wakeup"
 	SleepModeDisableMetricsTracking      = "sleepmode.loft.sh/disable-metrics-tracking"
+	SleepScopeAnnotation                 = "sleepmode.loft.sh/scope"
 
 	// Not yet in spec annotations
 	SleepModeIgnoreAll                     = "sleepmode.loft.sh/ignore-all"
@@ -113,6 +114,7 @@ type SleepModeConfigSpec struct {
 	// Timezone specifies time zone used for scheduled space operations. Defaults to UTC.
 	// Accepts the same format as time.LoadLocation() in Go (https://pkg.go.dev/time#LoadLocation).
 	// The value should be a location name corresponding to a file in the IANA Time Zone database, such as "America/New_York".
+	// See also: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 	// +optional
 	Timezone string `json:"timezone,omitempty"`
 

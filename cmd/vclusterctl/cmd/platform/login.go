@@ -75,9 +75,9 @@ vcluster platform login https://my-vcluster-platform.com --access-key myaccesske
 		},
 	}
 
-	loginCmd.Flags().StringVar(&cmd.Driver, "use-driver", "", "Switch vCluster driver between platform and helm")
+	loginCmd.Flags().StringVar(&cmd.Driver, "use-driver", "", "Switch vCluster driver between platform, helm, and docker")
 	loginCmd.Flags().StringVar(&cmd.AccessKey, "access-key", "", "The access key to use")
-	loginCmd.Flags().BoolVar(&cmd.Insecure, "insecure", true, product.Replace("Allow login into an insecure Loft instance"))
+	loginCmd.Flags().BoolVar(&cmd.Insecure, "insecure", false, product.Replace("Allow login into an insecure Loft instance"))
 	loginCmd.Flags().BoolVar(&cmd.DockerLogin, "docker-login", true, "If true, will log into the docker image registries the user has image pull secrets for")
 
 	return loginCmd
@@ -96,14 +96,14 @@ func (cmd *LoginCmd) Run(ctx context.Context, args []string) error {
 				insecureFlag = "--insecure"
 			}
 
-			err := cmd.printLoginDetails(ctx)
-			if err != nil {
-				cmd.Log.Fatalf("%s\n\nYou may need to log in again via: %s platform login %s %s\n", err.Error(), os.Args[0], cfg.Platform.Host, insecureFlag)
-			}
-
 			domain := cfg.Platform.Host
 			if domain == "" {
 				domain = "my-vcluster-platform.com"
+			}
+
+			err := cmd.printLoginDetails(ctx)
+			if err != nil {
+				cmd.Log.Fatalf("%s\n\nYou need to log in again via: %s platform login %s %s\n", err.Error(), os.Args[0], domain, insecureFlag)
 			}
 
 			cmd.Log.WriteString(logrus.InfoLevel, fmt.Sprintf("\nTo log in as a different user, run: %s platform login %s %s\n\n", os.Args[0], domain, insecureFlag))
@@ -119,11 +119,21 @@ func (cmd *LoginCmd) Run(ctx context.Context, args []string) error {
 	}
 
 	// log into platform
+	var err error
 	loginClient := platform.NewLoginClientFromConfig(cfg)
 	url = strings.TrimSuffix(url, "/")
-	var err error
 	if cmd.AccessKey != "" {
 		err = loginClient.LoginWithAccessKey(url, cmd.AccessKey, cmd.Insecure)
+	} else if cfg.Platform.AccessKey != "" && cfg.Platform.Host == url {
+		// check if user was already logged in i.e. config contains the access key for the same host
+		if loginErr := loginClient.LoginWithAccessKey(url, cfg.Platform.AccessKey, cmd.Insecure); loginErr != nil {
+			if errors.Is(loginErr, platform.ErrInvalidAccessKey) {
+				cmd.Log.Warnf("Invalid access key, attempting to login again...")
+				err = loginClient.Login(url, cmd.Insecure, cmd.Log)
+			} else {
+				err = loginErr
+			}
+		}
 	} else {
 		err = loginClient.Login(url, cmd.Insecure, cmd.Log)
 	}
@@ -155,6 +165,11 @@ func (cmd *LoginCmd) Run(ctx context.Context, args []string) error {
 
 func (cmd *LoginCmd) printLoginDetails(ctx context.Context) error {
 	cfg := cmd.LoadedConfig(cmd.Log)
+	// TODO: Refactor login to rely less on side effects from manipulating the cfg.Platform object in memory
+	if cmd.AccessKey != "" {
+		cfg.Platform.AccessKey = cmd.AccessKey
+	}
+
 	platformClient := platform.NewClientFromConfig(cfg)
 
 	managementClient, err := platformClient.Management()

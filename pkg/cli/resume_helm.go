@@ -26,6 +26,11 @@ func ResumeHelm(ctx context.Context, globalFlags *flags.GlobalFlags, vClusterNam
 		return err
 	}
 
+	if vCluster.Status == find.StatusScaledDown {
+		return fmt.Errorf("tenant cluster %s in namespace %s is scaled down but not paused, please pause it first with 'vcluster pause %s --namespace %s' before resuming",
+			vClusterName, vCluster.Namespace, vClusterName, vCluster.Namespace)
+	}
+
 	if vCluster.IsSleeping() {
 		return ErrPlatformDriverRequired
 	}
@@ -35,7 +40,7 @@ func ResumeHelm(ctx context.Context, globalFlags *flags.GlobalFlags, vClusterNam
 		return err
 	}
 
-	err = lifecycle.ResumeVCluster(ctx, kubeClient, vClusterName, globalFlags.Namespace, log)
+	err = lifecycle.ResumeVCluster(ctx, kubeClient, vClusterName, globalFlags.Namespace, false, log)
 	if err != nil {
 		return err
 	}

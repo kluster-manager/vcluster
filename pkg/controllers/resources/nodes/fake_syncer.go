@@ -135,7 +135,7 @@ func (r *fakeNodeSyncer) updateIfNeeded(ctx *synccontext.SyncContext, node *core
 }
 
 func (r *fakeNodeSyncer) nodeNeeded(ctx *synccontext.SyncContext, nodeName string) (bool, error) {
-	return isNodeNeededByPod(ctx, ctx.VirtualClient, ctx.PhysicalClient, nodeName)
+	return isNodeNeededByPod(ctx, ctx.VirtualClient, ctx.HostClient, nodeName)
 }
 
 // this is not a real guid, but it doesn't really matter because it should just look right and not be an actual guid
@@ -240,7 +240,7 @@ func createFakeNode(
 			BootID:                  newGUID(),
 			ContainerRuntimeVersion: "docker://19.3.12",
 			KernelVersion:           "4.19.76-fakelinux",
-			KubeProxyVersion:        FakeNodesVersion,
+			KubeProxyVersion:        FakeNodesVersion, //nolint:staticcheck //deprecated, but we should continue to use it until the api removes it
 			KubeletVersion:          FakeNodesVersion,
 			MachineID:               newGUID(),
 			SystemUUID:              newGUID(),

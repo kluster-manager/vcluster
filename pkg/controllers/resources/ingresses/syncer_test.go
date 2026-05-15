@@ -211,7 +211,10 @@ func TestSync(t *testing.T) {
 				}
 				pIngress.ResourceVersion = "999"
 
-				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pIngress, &networkingv1.Ingress{
+				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pIngress, pIngress, &networkingv1.Ingress{
+					ObjectMeta: vObjectMeta,
+					Spec:       *vBaseSpec.DeepCopy(),
+				}, &networkingv1.Ingress{
 					ObjectMeta: vObjectMeta,
 					Spec:       *vBaseSpec.DeepCopy(),
 				}))
@@ -233,7 +236,7 @@ func TestSync(t *testing.T) {
 				vIngress := noUpdateIngress.DeepCopy()
 				vIngress.ResourceVersion = "999"
 
-				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEvent(createdIngress.DeepCopy(), vIngress))
+				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(createdIngress.DeepCopy(), createdIngress.DeepCopy(), vIngress, vIngress))
 				assert.NilError(t, err)
 			},
 		},
@@ -253,25 +256,25 @@ func TestSync(t *testing.T) {
 				vIngress := baseIngress.DeepCopy()
 				vIngress.ResourceVersion = "999"
 
-				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(backwardUpdateIngress, vIngress, synccontext.SyncEventSourceHost))
+				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(baseIngress.DeepCopy(), backwardUpdateIngress, vIngress, vIngress))
 				assert.NilError(t, err)
 
 				err = syncCtx.VirtualClient.Get(syncCtx, types.NamespacedName{Namespace: vIngress.Namespace, Name: vIngress.Name}, vIngress)
 				assert.NilError(t, err)
 
-				err = syncCtx.PhysicalClient.Get(syncCtx, types.NamespacedName{Namespace: backwardUpdateIngress.Namespace, Name: backwardUpdateIngress.Name}, backwardUpdateIngress)
+				err = syncCtx.HostClient.Get(syncCtx, types.NamespacedName{Namespace: backwardUpdateIngress.Namespace, Name: backwardUpdateIngress.Name}, backwardUpdateIngress)
 				assert.NilError(t, err)
 
-				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(backwardUpdateIngress, vIngress, synccontext.SyncEventSourceHost))
+				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(backwardUpdateIngress, backwardUpdateIngress, vIngress, vIngress))
 				assert.NilError(t, err)
 
 				err = syncCtx.VirtualClient.Get(syncCtx, types.NamespacedName{Namespace: vIngress.Namespace, Name: vIngress.Name}, vIngress)
 				assert.NilError(t, err)
 
-				err = syncCtx.PhysicalClient.Get(syncCtx, types.NamespacedName{Namespace: backwardUpdateIngress.Namespace, Name: backwardUpdateIngress.Name}, backwardUpdateIngress)
+				err = syncCtx.HostClient.Get(syncCtx, types.NamespacedName{Namespace: backwardUpdateIngress.Namespace, Name: backwardUpdateIngress.Name}, backwardUpdateIngress)
 				assert.NilError(t, err)
 
-				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(backwardUpdateIngress, vIngress, synccontext.SyncEventSourceHost))
+				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(backwardUpdateIngress, backwardUpdateIngress, vIngress, vIngress))
 				assert.NilError(t, err)
 			},
 		},
@@ -290,7 +293,7 @@ func TestSync(t *testing.T) {
 				pIngress.ResourceVersion = "999"
 
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, registerContext, NewSyncer)
-				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pIngress, baseIngress.DeepCopy()))
+				_, err := syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pIngress, pIngress, baseIngress.DeepCopy(), baseIngress.DeepCopy()))
 				assert.NilError(t, err)
 			},
 		},
@@ -343,7 +346,6 @@ func TestSync(t *testing.T) {
 							Annotations: map[string]string{
 								"nginx.ingress.kubernetes.io/auth-secret":     translate.Default.HostName(nil, "my-secret", baseIngress.Namespace).Name,
 								"nginx.ingress.kubernetes.io/auth-tls-secret": createdIngress.Namespace + "/" + translate.Default.HostName(nil, "my-secret", baseIngress.Namespace).Name,
-								"vcluster.loft.sh/managed-annotations":        "nginx.ingress.kubernetes.io/auth-secret\nnginx.ingress.kubernetes.io/auth-tls-secret",
 								"vcluster.loft.sh/object-name":                baseIngress.Name,
 								"vcluster.loft.sh/object-namespace":           baseIngress.Namespace,
 								translate.UIDAnnotation:                       "",
@@ -363,10 +365,10 @@ func TestSync(t *testing.T) {
 				assert.NilError(t, err)
 
 				pIngress := &networkingv1.Ingress{}
-				err = syncCtx.PhysicalClient.Get(syncCtx, types.NamespacedName{Name: createdIngress.Name, Namespace: createdIngress.Namespace}, pIngress)
+				err = syncCtx.HostClient.Get(syncCtx, types.NamespacedName{Name: createdIngress.Name, Namespace: createdIngress.Namespace}, pIngress)
 				assert.NilError(t, err)
 
-				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pIngress, vIngress))
+				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pIngress, pIngress, baseIngress.DeepCopy(), vIngress))
 				assert.NilError(t, err)
 			},
 		},
@@ -419,7 +421,6 @@ func TestSync(t *testing.T) {
 							Namespace: createdIngress.Namespace,
 							Labels:    createdIngress.Labels,
 							Annotations: map[string]string{
-								"vcluster.loft.sh/managed-annotations":                           "alb.ingress.kubernetes.io/actions.ssl-redirect-x-test-x-suffix\nalb.ingress.kubernetes.io/actions.testservice-x-test-x-suffix\nnginx.ingress.kubernetes.io/auth-secret",
 								"nginx.ingress.kubernetes.io/auth-secret":                        translate.Default.HostName(nil, "my-secret", baseIngress.Namespace).Name,
 								"vcluster.loft.sh/object-name":                                   baseIngress.Name,
 								"vcluster.loft.sh/object-namespace":                              baseIngress.Namespace,
@@ -442,10 +443,87 @@ func TestSync(t *testing.T) {
 				assert.NilError(t, err)
 
 				pIngress := &networkingv1.Ingress{}
-				err = syncCtx.PhysicalClient.Get(syncCtx, types.NamespacedName{Name: createdIngress.Name, Namespace: createdIngress.Namespace}, pIngress)
+				err = syncCtx.HostClient.Get(syncCtx, types.NamespacedName{Name: createdIngress.Name, Namespace: createdIngress.Namespace}, pIngress)
 				assert.NilError(t, err)
 
-				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pIngress, vIngress))
+				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pIngress, pIngress, baseIngress.DeepCopy(), vIngress))
+				assert.NilError(t, err)
+			},
+		},
+		{
+			Name: "Exclude Rancher managed annotations from syncing",
+			InitialVirtualState: []runtime.Object{
+				&networkingv1.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      baseIngress.Name,
+						Namespace: baseIngress.Namespace,
+						Labels:    baseIngress.Labels,
+						Annotations: map[string]string{
+							"nginx.ingress.kubernetes.io/auth-secret":     "my-secret",
+							"nginx.ingress.kubernetes.io/auth-tls-secret": baseIngress.Namespace + "/my-secret",
+							"field.cattle.io/publicEndpoints":             `[{"addresses":["192.168.0.10"],"port":80,"protocol":"HTTP","serviceName":"default:nginx","ingressName":"default:test-ingress","hostname":"my-ingress-endpoint.com","path":"/","allNodes":false}]`,
+						},
+					},
+				},
+			},
+			InitialPhysicalState: []runtime.Object{
+				&networkingv1.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      createdIngress.Name,
+						Namespace: createdIngress.Namespace,
+						Labels:    createdIngress.Labels,
+					},
+				},
+			},
+			ExpectedVirtualState: map[schema.GroupVersionKind][]runtime.Object{
+				networkingv1.SchemeGroupVersion.WithKind("Ingress"): {
+					&networkingv1.Ingress{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      baseIngress.Name,
+							Namespace: baseIngress.Namespace,
+							Labels:    baseIngress.Labels,
+							Annotations: map[string]string{
+								"nginx.ingress.kubernetes.io/auth-secret":     "my-secret",
+								"nginx.ingress.kubernetes.io/auth-tls-secret": baseIngress.Namespace + "/my-secret",
+								"field.cattle.io/publicEndpoints":             `[{"addresses":["192.168.0.10"],"port":80,"protocol":"HTTP","serviceName":"default:nginx","ingressName":"default:test-ingress","hostname":"my-ingress-endpoint.com","path":"/","allNodes":false}]`,
+							},
+						},
+					},
+				},
+			},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				networkingv1.SchemeGroupVersion.WithKind("Ingress"): {
+					&networkingv1.Ingress{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      createdIngress.Name,
+							Namespace: createdIngress.Namespace,
+							Labels:    createdIngress.Labels,
+							Annotations: map[string]string{
+								"nginx.ingress.kubernetes.io/auth-secret":     translate.Default.HostName(nil, "my-secret", baseIngress.Namespace).Name,
+								"nginx.ingress.kubernetes.io/auth-tls-secret": createdIngress.Namespace + "/" + translate.Default.HostName(nil, "my-secret", baseIngress.Namespace).Name,
+								"vcluster.loft.sh/object-name":                baseIngress.Name,
+								"vcluster.loft.sh/object-namespace":           baseIngress.Namespace,
+								translate.UIDAnnotation:                       "",
+								translate.KindAnnotation:                      networkingv1.SchemeGroupVersion.WithKind("Ingress").String(),
+								translate.HostNamespaceAnnotation:             createdIngress.Namespace,
+								translate.HostNameAnnotation:                  createdIngress.Name,
+							},
+						},
+					},
+				},
+			},
+			Sync: func(registerContext *synccontext.RegisterContext) {
+				syncCtx, syncer := syncertesting.FakeStartSyncer(t, registerContext, NewSyncer)
+
+				vIngress := &networkingv1.Ingress{}
+				err := syncCtx.VirtualClient.Get(syncCtx, types.NamespacedName{Name: baseIngress.Name, Namespace: baseIngress.Namespace}, vIngress)
+				assert.NilError(t, err)
+
+				pIngress := &networkingv1.Ingress{}
+				err = syncCtx.HostClient.Get(syncCtx, types.NamespacedName{Name: createdIngress.Name, Namespace: createdIngress.Namespace}, pIngress)
+				assert.NilError(t, err)
+
+				_, err = syncer.(*ingressSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pIngress, pIngress, baseIngress.DeepCopy(), vIngress))
 				assert.NilError(t, err)
 			},
 		},

@@ -4,34 +4,42 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/blang/semver"
 	"github.com/loft-sh/log"
 	"github.com/loft-sh/log/survey"
 	"github.com/loft-sh/log/terminal"
+	"github.com/loft-sh/vcluster/pkg/cli/config"
+	"github.com/loft-sh/vcluster/pkg/cli/email"
 	"github.com/loft-sh/vcluster/pkg/cli/find"
 	"github.com/loft-sh/vcluster/pkg/cli/flags"
 	"github.com/loft-sh/vcluster/pkg/cli/start"
 	"github.com/loft-sh/vcluster/pkg/platform"
 	"github.com/loft-sh/vcluster/pkg/platform/clihelper"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 type StartCmd struct {
-	start.Options
+	start.StartOptions
 }
 
 func NewStartCmd(globalFlags *flags.GlobalFlags) *cobra.Command {
+	name := "start"
 	cmd := &StartCmd{
-		Options: start.Options{
-			GlobalFlags: globalFlags,
-			Log:         log.GetInstance(),
+		StartOptions: start.StartOptions{
+			Options: start.Options{
+				CommandName: name,
+				GlobalFlags: globalFlags,
+				Log:         log.GetInstance(),
+			},
 		},
 	}
 
 	startCmd := &cobra.Command{
-		Use:   "start",
+		Use:   name,
 		Short: "Start a vCluster platform instance and connect via port-forwarding",
 		Long: `########################################################
 ############# vcluster platform start ##################
@@ -46,6 +54,10 @@ before running this command:
 1. Current kube-context has admin access to the cluster
 2. Helm v3 must be installed
 3. kubectl must be installed
+
+NOTE: TLS certificate verification is disabled by default
+during platform startup because the platform uses a self-signed
+certificate. Use --secure to enable TLS verification.
 
 ########################################################
 	`,
@@ -73,12 +85,29 @@ before running this command:
 	startCmd.Flags().StringVar(&cmd.ChartPath, "chart-path", "", "The vCluster platform chart path to deploy vCluster platform")
 	startCmd.Flags().StringVar(&cmd.ChartRepo, "chart-repo", "https://charts.loft.sh/", "The chart repo to deploy vCluster platform")
 	startCmd.Flags().StringVar(&cmd.ChartName, "chart-name", "vcluster-platform", "The chart name to deploy vCluster platform")
+	startCmd.Flags().BoolVar(&cmd.Docker, "docker", false, "If true, vCluster platform will be installed in Docker")
+	startCmd.Flags().BoolVar(&cmd.Secure, "secure", false, "If true, verify TLS certificates when connecting to the platform (by default, TLS verification is skipped during bootstrap because the platform starts with a self-signed certificate)")
 
 	return startCmd
 }
 
 func (cmd *StartCmd) Run(ctx context.Context) error {
-	// get version to deploy
+	cfg := cmd.LoadedConfig(cmd.Log)
+
+	// Bootstrap defaults to insecure because the platform starts with a
+	// self-signed certificate. Pass --secure to enforce TLS verification.
+	if !cmd.Secure {
+		cmd.Log.Warn("TLS is disabled by default during platform startup because the platform uses a self-signed certificate. Use --secure to enable TLS verification.")
+		cfg.Platform.Insecure = true
+	}
+
+	// automatically use docker mode if the driver is set to docker
+	if cfg.Driver.Type == config.DockerDriver && !cmd.Docker {
+		cmd.Log.Info("Automatically using --docker flag because driver is set to 'docker'")
+		cmd.Docker = true
+	}
+
+	// get the version to deploy
 	if cmd.Version == "latest" || cmd.Version == "" {
 		cmd.Version = platform.MinimumVersionTag
 		latestVersion, err := platform.LatestCompatibleVersion(ctx)
@@ -140,5 +169,92 @@ func (cmd *StartCmd) Run(ctx context.Context) error {
 		}
 	}
 
-	return start.NewLoftStarter(cmd.Options).Start(ctx)
+	if !cmd.Docker {
+		if err := cmd.StartOptions.Prepare(); err != nil {
+			return err
+		}
+	}
+
+	if !cmd.platformUsesNewActivationFlow(cmd.Version) {
+		if err := cmd.ensureEmailWithDisclaimer(ctx, cmd.KubeClient, cmd.Namespace); err != nil {
+			return err
+		}
+	}
+
+	return start.NewLoftStarter(cmd.StartOptions).Start(ctx)
+}
+
+func (cmd *StartCmd) ensureEmailWithDisclaimer(ctx context.Context, kc kubernetes.Interface, namespace string) error {
+	if cmd.Upgrade {
+		if cmd.Docker {
+			return nil
+		}
+
+		isInstalled, err := clihelper.IsLoftAlreadyInstalled(ctx, kc, namespace)
+		if err != nil {
+			return err
+		}
+		if isInstalled {
+			return nil
+		}
+	}
+
+	fmt.Printf(`By providing your email, you accept our Terms of Service and Privacy Statement:
+Terms of Service: https://www.loft.sh/legal/terms
+Privacy Statement: https://www.loft.sh/legal/privacy
+`)
+	if !terminal.IsTerminalIn {
+		return validateEmail(cmd.Email)
+	}
+
+	var err error
+	if cmd.Email, err = promptForEmail(cmd.Email); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// platformUsesNewActivationFlow checks if the platform version supports the new platform activation flow.
+//
+// The new platform activation flow is supported for the platform version 4.6.0-rc.8 and above.
+func (cmd *StartCmd) platformUsesNewActivationFlow(platformVersion string) bool {
+	platformSemVerVersion, err := semver.ParseTolerant(platformVersion)
+	if err != nil {
+		cmd.Log.Warnf("Failed to parse platform version %s, falling back to the old platform activation flow with the admin email prompt", platformVersion)
+		return false
+	}
+
+	const minPlatformVersionWithNewActivationFlow = "4.6.0-rc.8"
+	if platformSemVerVersion.GTE(semver.MustParse(minPlatformVersionWithNewActivationFlow)) {
+		cmd.Log.Debugf("Platform version %s is greater than or equal to %s, platform is using the new activation flow, so skipping admin email prompt", platformVersion, minPlatformVersionWithNewActivationFlow)
+		return true
+	}
+
+	cmd.Log.Debugf("Platform version %s is not using the new activation flow, so admin email is required", platformVersion)
+	return false
+}
+
+func promptForEmail(emailAddress string) (string, error) {
+	if err := validateEmail(emailAddress); err != nil {
+		return survey.NewSurvey().Question(&survey.QuestionOptions{
+			Question:       "Please specify an email address for the admin user",
+			ValidationFunc: validateEmail,
+		})
+	}
+
+	return emailAddress, nil
+}
+
+func validateEmail(emailAddress string) error {
+	if emailAddress == "" {
+		return fmt.Errorf("admin email address is required")
+	}
+
+	// 10 second timeout per ENG-4850
+	if err := email.Validate(emailAddress, email.WithCheckMXTimeout(time.Second*10)); err != nil {
+		return fmt.Errorf(`"%s" failed with error: "%w"`, emailAddress, err)
+	}
+
+	return nil
 }

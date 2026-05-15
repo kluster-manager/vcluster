@@ -6,17 +6,14 @@ import (
 	"github.com/loft-sh/vcluster/pkg/specialservices"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertesting "github.com/loft-sh/vcluster/pkg/syncer/testing"
-	"gotest.tools/assert"
-	"k8s.io/apimachinery/pkg/util/intstr"
-
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/loft-sh/vcluster/pkg/util/translate"
-
+	"gotest.tools/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestSync(t *testing.T) {
@@ -64,15 +61,14 @@ func TestSync(t *testing.T) {
 		},
 		PublishNotReadyAddresses: true,
 		Type:                     corev1.ServiceTypeNodePort,
-		ExternalName:             "external",
 		ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyTypeLocal,
 		SessionAffinity:          corev1.ServiceAffinityClientIP,
-		LoadBalancerSourceRanges: []string{"backwardRange"},
 		SessionAffinityConfig: &corev1.SessionAffinityConfig{
 			ClientIP: &corev1.ClientIPConfig{},
 		},
 		HealthCheckNodePort: 112,
 	}
+
 	updateForwardService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        vObjectMeta.Name,
@@ -86,14 +82,13 @@ func TestSync(t *testing.T) {
 			Name:      pObjectMeta.Name,
 			Namespace: pObjectMeta.Namespace,
 			Annotations: map[string]string{
-				translate.NameAnnotation:               vObjectMeta.Name,
-				translate.NamespaceAnnotation:          vObjectMeta.Namespace,
-				translate.UIDAnnotation:                "",
-				translate.KindAnnotation:               corev1.SchemeGroupVersion.WithKind("Service").String(),
-				translate.HostNamespaceAnnotation:      pObjectMeta.Namespace,
-				translate.HostNameAnnotation:           pObjectMeta.Name,
-				translate.ManagedAnnotationsAnnotation: "a",
-				"a":                                    "b",
+				translate.NameAnnotation:          vObjectMeta.Name,
+				translate.NamespaceAnnotation:     vObjectMeta.Namespace,
+				translate.UIDAnnotation:           "",
+				translate.KindAnnotation:          corev1.SchemeGroupVersion.WithKind("Service").String(),
+				translate.HostNamespaceAnnotation: pObjectMeta.Namespace,
+				translate.HostNameAnnotation:      pObjectMeta.Name,
+				"a":                               "b",
 			},
 			Labels: pObjectMeta.Labels,
 		},
@@ -118,9 +113,8 @@ func TestSync(t *testing.T) {
 			Annotations: pObjectMeta.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			ExternalName:   "backwardExternal",
-			ExternalIPs:    []string{"123:221:123:221"},
-			LoadBalancerIP: "123:213:123:213",
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: "backwardExternal",
 		},
 	}
 	updatedBackwardSpecService := &corev1.Service{
@@ -129,9 +123,8 @@ func TestSync(t *testing.T) {
 			Namespace: vObjectMeta.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
-			ExternalName:   "backwardExternal",
-			ExternalIPs:    []string{"123:221:123:221"},
-			LoadBalancerIP: "123:213:123:213",
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: "backwardExternal",
 		},
 	}
 	updateBackwardSpecRecreateService := &corev1.Service{
@@ -142,6 +135,19 @@ func TestSync(t *testing.T) {
 			Annotations: pObjectMeta.Annotations,
 		},
 		Spec: updateBackwardRecreateSpec,
+	}
+	updateBackwardSpecRecreateServiceExpected := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        pObjectMeta.Name,
+			Namespace:   pObjectMeta.Namespace,
+			Labels:      pObjectMeta.Labels,
+			Annotations: pObjectMeta.Annotations,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:    "123:123:123:123",
+			ExternalName: updateBackwardSpec.ExternalName,
+			ExternalIPs:  updateBackwardSpec.ExternalIPs,
+		},
 	}
 	updatedBackwardSpecRecreateService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -169,9 +175,17 @@ func TestSync(t *testing.T) {
 		ObjectMeta: pObjectMeta,
 		Status:     updateBackwardStatus,
 	}
+	updateBackwardStatusServiceExpected := &corev1.Service{
+		ObjectMeta: pObjectMeta,
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{},
+		},
+	}
 	updatedBackwardStatusService := &corev1.Service{
 		ObjectMeta: vObjectMeta,
-		Status:     updateBackwardStatus,
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{},
+		},
 	}
 	kubernetesWithClusterIPService := &corev1.Service{
 		ObjectMeta: vKubernetesObjectMeta,
@@ -259,8 +273,7 @@ func TestSync(t *testing.T) {
 	vServiceClusterIPFromExternal := &corev1.Service{
 		ObjectMeta: vObjectMeta,
 		Spec: corev1.ServiceSpec{
-			ExternalName: "test.com",
-			Type:         corev1.ServiceTypeClusterIP,
+			Type: corev1.ServiceTypeClusterIP,
 			Ports: []corev1.ServicePort{
 				{
 					Name: "http",
@@ -279,12 +292,17 @@ func TestSync(t *testing.T) {
 	pServiceClusterIPFromExternal := &corev1.Service{
 		ObjectMeta: pObjectMeta,
 		Spec: corev1.ServiceSpec{
-			ExternalName: "test.com",
-			Type:         corev1.ServiceTypeClusterIP,
-			Ports:        vServiceClusterIPFromExternal.Spec.Ports,
+			Type:  corev1.ServiceTypeClusterIP,
+			Ports: vServiceClusterIPFromExternal.Spec.Ports,
 		},
 	}
 	selectorKey := "test"
+	vServiceNodePortFromExternalBefore := &corev1.Service{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.ServiceSpec{
+			ExternalName: "test.com",
+		},
+	}
 	vServiceNodePortFromExternal := &corev1.Service{
 		ObjectMeta: vObjectMeta,
 		Spec: corev1.ServiceSpec{
@@ -310,8 +328,129 @@ func TestSync(t *testing.T) {
 			Ports: vServiceNodePortFromExternal.Spec.Ports,
 		},
 	}
+	vServiceNodePortFromLoadBalancer := &corev1.Service{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{selectorKey: "test-key"},
+			Type:     corev1.ServiceTypeNodePort,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+	}
+	vServiceNodePortFromLoadBalancerBefore := &corev1.Service{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{selectorKey: "test-key"},
+			Type:     corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						IP: "1.2.3.4",
+					},
+				},
+			},
+		},
+	}
+	pServiceLoadBalancer := &corev1.Service{
+		ObjectMeta: pObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				translate.HostLabel(selectorKey): vServiceNodePortFromExternal.Spec.Selector[selectorKey],
+				translate.NamespaceLabel:         vServiceNodePortFromExternal.Namespace,
+				translate.MarkerLabel:            translate.VClusterName,
+			},
+			Type: corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+	}
+	pServiceNodePortFromLoadBalancer := &corev1.Service{
+		ObjectMeta: pObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				translate.HostLabel(selectorKey): vServiceNodePortFromLoadBalancer.Spec.Selector[selectorKey],
+				translate.NamespaceLabel:         vServiceNodePortFromLoadBalancer.Namespace,
+				translate.MarkerLabel:            translate.VClusterName,
+			},
+			Type: corev1.ServiceTypeNodePort,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+	}
+	vServiceClusterIPFromLoadBalancer := &corev1.Service{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{selectorKey: "test-key"},
+			Type:     corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+	}
+	vServiceClusterIPFromLoadBalancerBefore := &corev1.Service{
+		ObjectMeta: vObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{selectorKey: "test-key"},
+			Type:     corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						IP: "1.2.3.4",
+					},
+				},
+			},
+		},
+	}
+	pServiceClusterIPFromLoadBalancer := &corev1.Service{
+		ObjectMeta: pObjectMeta,
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{
+				translate.HostLabel(selectorKey): vServiceClusterIPFromLoadBalancer.Spec.Selector[selectorKey],
+				translate.NamespaceLabel:         vServiceClusterIPFromLoadBalancer.Namespace,
+				translate.MarkerLabel:            translate.VClusterName,
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Name: "http",
+					Port: 8080,
+				},
+			},
+		},
+	}
 
-	syncertesting.RunTests(t, []*syncertesting.SyncTest{
+	tests := []*syncertesting.SyncTest{
 		{
 			Name:                "Create Forward",
 			InitialVirtualState: []runtime.Object{baseService.DeepCopy()},
@@ -323,6 +462,7 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				baseService := baseService.DeepCopy()
 				_, err := syncer.(*serviceSyncer).SyncToHost(syncCtx, synccontext.NewSyncToHostEvent(baseService))
 				assert.NilError(t, err)
 			},
@@ -339,7 +479,10 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(pServicePorts1.DeepCopy(), vServicePorts1.DeepCopy(), synccontext.SyncEventSourceHost))
+				pObjOld := baseService.DeepCopy()
+				pObjNew := pServicePorts1.DeepCopy()
+				vObj := vServicePorts1.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObj, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -355,23 +498,31 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pServicePorts2.DeepCopy(), vServicePorts1.DeepCopy()))
+				pObj := pServicePorts2.DeepCopy()
+				vObjOld := baseService.DeepCopy()
+				vObjNew := vServicePorts1.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObj, pObj, vObjOld, vObjNew))
 				assert.NilError(t, err)
 			},
 		},
 		{
 			Name:                 "Update forward",
-			InitialVirtualState:  []runtime.Object{updateForwardService.DeepCopy()},
 			InitialPhysicalState: []runtime.Object{createdByServerService.DeepCopy()},
-			ExpectedVirtualState: map[schema.GroupVersionKind][]runtime.Object{
-				corev1.SchemeGroupVersion.WithKind("Service"): {updateForwardService.DeepCopy()},
-			},
 			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
 				corev1.SchemeGroupVersion.WithKind("Service"): {updatedForwardService.DeepCopy()},
 			},
+
+			InitialVirtualState: []runtime.Object{updateForwardService.DeepCopy()},
+			ExpectedVirtualState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Service"): {updateForwardService.DeepCopy()},
+			},
+
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(createdByServerService.DeepCopy(), updateForwardService.DeepCopy()))
+				pObjOld := createdByServerService.DeepCopy()
+				vObjOld := createdService.DeepCopy()
+				vObj := updateForwardService.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjOld, vObjOld, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -387,7 +538,9 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(createdService.DeepCopy(), baseService.DeepCopy()))
+				pObj := createdService.DeepCopy()
+				vObj := baseService.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObj, pObj, vObj, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -403,19 +556,20 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				baseService := baseService.DeepCopy()
-				updateBackwardSpecService := updateBackwardSpecService.DeepCopy()
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(updateBackwardSpecService, baseService, synccontext.SyncEventSourceHost))
+				pObjOld := baseService.DeepCopy()
+				vObj := baseService.DeepCopy()
+				pObjNew := updateBackwardSpecService.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObj, vObj))
 				assert.NilError(t, err)
 
-				err = ctx.VirtualManager.GetClient().Get(ctx, types.NamespacedName{Namespace: baseService.Namespace, Name: baseService.Name}, baseService)
+				err = ctx.VirtualManager.GetClient().Get(ctx, types.NamespacedName{Namespace: pObjOld.Namespace, Name: pObjOld.Name}, pObjOld)
 				assert.NilError(t, err)
 
-				err = ctx.PhysicalManager.GetClient().Get(ctx, types.NamespacedName{Namespace: updateBackwardSpecService.Namespace, Name: updateBackwardSpecService.Name}, updateBackwardSpecService)
+				err = ctx.HostManager.GetClient().Get(ctx, types.NamespacedName{Namespace: pObjNew.Namespace, Name: pObjNew.Name}, pObjNew)
 				assert.NilError(t, err)
 
-				baseService.Spec.ExternalName = updateBackwardSpecService.Spec.ExternalName
-				_, err = syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(updateBackwardSpecService.DeepCopy(), baseService.DeepCopy(), synccontext.SyncEventSourceHost))
+				pObjOld.Spec.ExternalName = pObjNew.Spec.ExternalName
+				_, err = syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjNew, pObjNew, vObj, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -427,23 +581,24 @@ func TestSync(t *testing.T) {
 				corev1.SchemeGroupVersion.WithKind("Service"): {updatedBackwardSpecRecreateService.DeepCopy()},
 			},
 			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
-				corev1.SchemeGroupVersion.WithKind("Service"): {updateBackwardSpecRecreateService.DeepCopy()},
+				corev1.SchemeGroupVersion.WithKind("Service"): {updateBackwardSpecRecreateServiceExpected.DeepCopy()},
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				baseService := baseService.DeepCopy()
-				updateBackwardSpecRecreateService := updateBackwardSpecRecreateService.DeepCopy()
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(updateBackwardSpecRecreateService, baseService))
+				pObj := updateBackwardSpecRecreateService.DeepCopy()
+				vObj := baseService.DeepCopy()
+				result, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(baseService.DeepCopy(), pObj, vObj, vObj))
+				assert.NilError(t, err)
+				assert.Equal(t, result.Requeue, true) //nolint:staticcheck
+
+				err = ctx.VirtualManager.GetClient().Get(ctx, types.NamespacedName{Namespace: vObj.Namespace, Name: vObj.Name}, vObj)
 				assert.NilError(t, err)
 
-				err = ctx.VirtualManager.GetClient().Get(ctx, types.NamespacedName{Namespace: baseService.Namespace, Name: baseService.Name}, baseService)
+				err = ctx.HostManager.GetClient().Get(ctx, types.NamespacedName{Namespace: pObj.Namespace, Name: pObj.Name}, pObj)
 				assert.NilError(t, err)
 
-				err = ctx.PhysicalManager.GetClient().Get(ctx, types.NamespacedName{Namespace: updateBackwardSpecRecreateService.Namespace, Name: updateBackwardSpecRecreateService.Name}, updateBackwardSpecRecreateService)
-				assert.NilError(t, err)
-
-				baseService.Spec.ExternalName = updateBackwardSpecService.Spec.ExternalName
-				_, err = syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithSource(updateBackwardSpecRecreateService.DeepCopy(), baseService.DeepCopy(), synccontext.SyncEventSourceHost))
+				pObj.Spec.ExternalName = updateBackwardSpecService.Spec.ExternalName
+				_, err = syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(baseService.DeepCopy(), pObj.DeepCopy(), vObj.DeepCopy(), vObj.DeepCopy()))
 				assert.NilError(t, err)
 			},
 		},
@@ -455,11 +610,14 @@ func TestSync(t *testing.T) {
 				corev1.SchemeGroupVersion.WithKind("Service"): {updatedBackwardStatusService.DeepCopy()},
 			},
 			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
-				corev1.SchemeGroupVersion.WithKind("Service"): {updateBackwardStatusService.DeepCopy()},
+				corev1.SchemeGroupVersion.WithKind("Service"): {updateBackwardStatusServiceExpected.DeepCopy()},
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(updateBackwardStatusService.DeepCopy(), baseService.DeepCopy()))
+				pObjOld := updateBackwardSpecService.DeepCopy()
+				pObjNew := updateBackwardStatusService.DeepCopy()
+				vObj := baseService.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObj, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -475,7 +633,9 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(createdService.DeepCopy(), baseService.DeepCopy()))
+				pObj := createdService.DeepCopy()
+				vObj := baseService.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObj, pObj, vObj, vObj))
 				assert.NilError(t, err)
 			},
 		},
@@ -563,7 +723,11 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pServiceExternal.DeepCopy(), vServiceClusterIPFromExternal.DeepCopy()))
+				vObjOld := vServiceNodePortFromExternalBefore.DeepCopy()
+				vObjNew := vServiceClusterIPFromExternal.DeepCopy()
+				pObj := pServiceExternal.DeepCopy()
+
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObj, pObj, vObjOld, vObjNew))
 				assert.NilError(t, err)
 			},
 		},
@@ -579,9 +743,54 @@ func TestSync(t *testing.T) {
 			},
 			Sync: func(ctx *synccontext.RegisterContext) {
 				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
-				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEvent(pServiceExternal.DeepCopy(), vServiceNodePortFromExternal.DeepCopy()))
+				pObjOld := pServiceExternal.DeepCopy()
+				pObjNew := pServiceExternal.DeepCopy()
+				vObjOld := vServiceNodePortFromExternalBefore.DeepCopy()
+				vObjNew := vServiceNodePortFromExternal.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObjOld, vObjNew))
 				assert.NilError(t, err)
 			},
 		},
-	})
+		{
+			Name:                 "Sync kubernetes service change type LoadBalancer to NodePort",
+			InitialVirtualState:  []runtime.Object{vServiceNodePortFromLoadBalancer.DeepCopy()},
+			InitialPhysicalState: []runtime.Object{pServiceLoadBalancer.DeepCopy()},
+			ExpectedVirtualState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Service"): {vServiceNodePortFromLoadBalancer.DeepCopy()},
+			},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Service"): {pServiceNodePortFromLoadBalancer.DeepCopy()},
+			},
+			Sync: func(ctx *synccontext.RegisterContext) {
+				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				pObjOld := pServiceLoadBalancer.DeepCopy()
+				pObjNew := pServiceLoadBalancer.DeepCopy()
+				vObjOld := vServiceNodePortFromLoadBalancerBefore.DeepCopy()
+				vObjNew := vServiceNodePortFromLoadBalancer.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObjOld, vObjNew))
+				assert.NilError(t, err)
+			},
+		},
+		{
+			Name:                 "Sync kubernetes service change type LoadBalancer to ClusterIP",
+			InitialVirtualState:  []runtime.Object{vServiceClusterIPFromLoadBalancer.DeepCopy()},
+			InitialPhysicalState: []runtime.Object{pServiceLoadBalancer.DeepCopy()},
+			ExpectedVirtualState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Service"): {vServiceClusterIPFromLoadBalancer.DeepCopy()},
+			},
+			ExpectedPhysicalState: map[schema.GroupVersionKind][]runtime.Object{
+				corev1.SchemeGroupVersion.WithKind("Service"): {pServiceClusterIPFromLoadBalancer.DeepCopy()},
+			},
+			Sync: func(ctx *synccontext.RegisterContext) {
+				syncCtx, syncer := syncertesting.FakeStartSyncer(t, ctx, New)
+				pObjOld := pServiceLoadBalancer.DeepCopy()
+				pObjNew := pServiceLoadBalancer.DeepCopy()
+				vObjOld := vServiceClusterIPFromLoadBalancerBefore.DeepCopy()
+				vObjNew := vServiceClusterIPFromLoadBalancer.DeepCopy()
+				_, err := syncer.(*serviceSyncer).Sync(syncCtx, synccontext.NewSyncEventWithOld(pObjOld, pObjNew, vObjOld, vObjNew))
+				assert.NilError(t, err)
+			},
+		},
+	}
+	syncertesting.RunTests(t, tests)
 }

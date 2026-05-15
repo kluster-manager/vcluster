@@ -12,8 +12,28 @@ type FeatureStatus string
 type FeatureName string
 type ButtonName string
 
+// Metadata Keys
+const (
+	/* NEVER CHANGE ANY OF THESE */
+	MetadataKeyAttachAll              = "attach_all_features"
+	MetadataKeyProductForFeature      = "product_for_feature"
+	MetadataKeyFeatureIsHidden        = "is_hidden"
+	MetadataKeyFeatureIsPreview       = "is_preview"
+	MetadataKeyFeatureIsLimit         = "is_limit"
+	MetadataKeyFeatureLimitType       = "limit_type"
+	MetadataKeyFeatureLimitTypeActive = "active"
+	MetadataValueTrue                 = "true"
+)
+
+// Other
+const (
+	/* NEVER CHANGE ANY OF THESE */
+	LimitsPrefix = "limits-"
+)
+
 // Products
 const (
+	/* NEVER CHANGE ANY OF THESE */
 	Loft        ProductName = "loft"
 	VClusterPro ProductName = "vcluster-pro"
 	DevPodPro   ProductName = "devpod-pro"
@@ -55,12 +75,14 @@ const (
 
 // Resources (e.g. for limits)
 const (
-	ConnectedClusterLimit        ResourceName = "connected-cluster"
-	VirtualClusterInstanceLimit  ResourceName = "virtual-cluster-instance"
-	SpaceInstanceLimit           ResourceName = "space-instance"
-	DevPodWorkspaceInstanceLimit ResourceName = "devpod-workspace-instance"
-	UserLimit                    ResourceName = "user"
-	InstanceLimit                ResourceName = "instance"
+	/* NEVER CHANGE ANY OF THESE */
+	ConnectedClusterLimit         ResourceName = "connected-cluster"
+	VirtualClusterInstanceLimit   ResourceName = "virtual-cluster-instance"
+	VirtualClusterInstanceHALimit ResourceName = "virtual-cluster-instance-ha"
+	SpaceInstanceLimit            ResourceName = "space-instance"
+	DevPodWorkspaceInstanceLimit  ResourceName = "devpod-workspace-instance"
+	UserLimit                     ResourceName = "user"
+	InstanceLimit                 ResourceName = "instance"
 )
 
 // Resource Status

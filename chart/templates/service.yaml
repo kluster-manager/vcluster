@@ -1,14 +1,18 @@
-{{- if .Values.controlPlane.service.enabled }}
+{{- $platform_svc_exists := lookup "v1" "Service" .Release.Namespace "loft" }}
+{{- if $platform_svc_exists }}
+{{- fail (printf "a vCluster platform installation exists in the namespace '%s'. Aborting install" .Release.Namespace) }}
+{{- else if .Values.controlPlane.service.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ template "vcluster.name" . }}
+  name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app: vcluster
-    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    chart: "{{ include "vcluster.version.label"  $ }}"
     release: "{{ .Release.Name }}"
     heritage: "{{ .Release.Service }}"
+    vcluster.loft.sh/service: "true"
     {{- if .Values.controlPlane.service.labels }}
 {{ toYaml .Values.controlPlane.service.labels | indent 4 }}
     {{- end }}
@@ -23,22 +27,24 @@ spec:
   ports:
     - name: https
       port: 443
-      {{- if not .Values.experimental.isolatedControlPlane.headless }}
       targetPort: 8443
-      {{- end }}
       nodePort: {{ .Values.controlPlane.service.httpsNodePort }}
       protocol: TCP
+    {{- if .Values.integrations.istio.enabled }}
+    - name: wake-http
+      port: 9090
+      nodePort: {{ .Values.controlPlane.service.httpsNodePort }}
+      protocol: TCP
+   {{- end }}
    {{- if and .Values.networking.advanced.proxyKubelets.byHostname (not (eq .Values.controlPlane.service.spec.type "LoadBalancer")) }}
     - name: kubelet
       port: 10250
-      {{- if not .Values.experimental.isolatedControlPlane.headless }}
       targetPort: 8443
-      {{- end }}
       nodePort: {{ .Values.controlPlane.service.kubeletNodePort }}
       protocol: TCP
     {{- end }}
   {{- end }}
-  {{- if and (not .Values.controlPlane.service.spec.selector) (not .Values.experimental.isolatedControlPlane.headless) }}
+  {{- if not .Values.controlPlane.service.spec.selector }}
   selector:
     app: vcluster
     release: {{ .Release.Name | quote }}

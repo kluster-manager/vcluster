@@ -45,6 +45,13 @@ func FakeStartSyncer(t *testing.T, ctx *synccontext.RegisterContext, create func
 	}
 
 	syncCtx := ctx.ToSyncContext(object.Name())
+
+	// check if object cache is needed
+	optionsProvider, ok := object.(syncer.OptionsProvider)
+	if ok && optionsProvider.Options().ObjectCaching {
+		syncCtx.ObjectCache = synccontext.NewBidirectionalObjectCache(object.Resource(), mapper)
+	}
+
 	syncCtx.Log = loghelper.NewFromExisting(log.NewLog(0), object.Name())
 	return syncCtx, object
 }
@@ -60,7 +67,7 @@ func NewFakeRegisterContext(vConfig *config.VirtualClusterConfig, pClient *testi
 		CurrentNamespace:       testingutil.DefaultTestCurrentNamespace,
 		CurrentNamespaceClient: pClient,
 		VirtualManager:         testingutil.NewFakeManager(vClient),
-		PhysicalManager:        testingutil.NewFakeManager(pClient),
+		HostManager:            testingutil.NewFakeManager(pClient),
 	}
 
 	// create new store

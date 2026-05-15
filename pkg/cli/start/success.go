@@ -68,7 +68,8 @@ func (l *LoftStarter) success(ctx context.Context) error {
 	}
 
 	// check if loft is reachable
-	reachable, err := clihelper.IsLoftReachable(ctx, host)
+	insecure := l.LoadedConfig(l.Log).Platform.Insecure
+	reachable, err := clihelper.IsLoftReachable(ctx, host, insecure)
 	if !reachable || err != nil {
 		const (
 			YesOption = "Yes"
@@ -123,10 +124,11 @@ func (l *LoftStarter) pingLoftRouter(ctx context.Context, loftPod *corev1.Pod) (
 	loftRouterDomain := string(loftRouterSecret.Data["domain"])
 
 	// wait until loft is reachable at the given url
+	insecure := l.LoadedConfig(l.Log).Platform.Insecure
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: insecure,
 			},
 		},
 	}
@@ -190,7 +192,8 @@ func (l *LoftStarter) isLoggedIn(url string) bool {
 }
 
 func (l *LoftStarter) successRemote(ctx context.Context, host string) error {
-	ready, err := clihelper.IsLoftReachable(ctx, host)
+	insecure := l.LoadedConfig(l.Log).Platform.Insecure
+	ready, err := clihelper.IsLoftReachable(ctx, host, insecure)
 	if err != nil {
 		return err
 	} else if ready {
@@ -203,7 +206,7 @@ func (l *LoftStarter) successRemote(ctx context.Context, host string) error {
 
 	l.Log.Info("Waiting for you to configure DNS, so loft can be reached on https://" + host)
 	err = wait.PollUntilContextTimeout(ctx, 5*time.Second, clihelper.Timeout(), true, func(ctx context.Context) (done bool, err error) {
-		return clihelper.IsLoftReachable(ctx, host)
+		return clihelper.IsLoftReachable(ctx, host, insecure)
 	})
 	if err != nil {
 		return err
@@ -221,11 +224,11 @@ func (l *LoftStarter) printVClusterProGettingStarted(url string) {
 
 	if l.isLoggedIn(url) {
 		l.Log.Donef("You are successfully logged into vCluster Platform!")
-		l.Log.WriteString(logrus.InfoLevel, "- Use `vcluster create` to create a new virtual cluster\n")
+		l.Log.WriteString(logrus.InfoLevel, "- Use `vcluster platform create vcluster` to create a new virtual cluster\n")
 		l.Log.WriteString(logrus.InfoLevel, "- Use `vcluster platform add vcluster` to add an existing virtual cluster to a vCluster platform instance\n")
 	} else {
 		l.Log.Warnf("You are not logged into vCluster Platform yet, please run the below command to log into the vCluster Platform instance")
-		l.Log.WriteString(logrus.InfoLevel, "- Use `vcluster login "+url+"` to log into the vCluster Platform instance\n")
+		l.Log.WriteString(logrus.InfoLevel, "- Use `vcluster platform login "+url+"` to log into the vCluster Platform instance\n")
 	}
 }
 

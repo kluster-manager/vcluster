@@ -6,7 +6,11 @@ import (
 
 	"github.com/go-logr/logr"
 	loftlogr "github.com/loft-sh/log/logr"
+	"github.com/loft-sh/vcluster/cmd/vcluster/cmd/certs"
 	"github.com/loft-sh/vcluster/cmd/vcluster/cmd/debug"
+	"github.com/loft-sh/vcluster/cmd/vcluster/cmd/node"
+	"github.com/loft-sh/vcluster/cmd/vcluster/cmd/snapshot"
+	"github.com/loft-sh/vcluster/pkg/util/osutil"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,6 +28,13 @@ func NewRootCmd() *cobra.Command {
 }
 
 func RunRoot() {
+	RunRootWith(BuildRoot())
+}
+
+func RunRootWith(rootCmd *cobra.Command) {
+	// handle interrupts
+	osutil.HandleInterrupts()
+
 	// set global logger
 	if os.Getenv("DEBUG") == "true" {
 		_ = os.Setenv("LOFT_LOG_LEVEL", "debug")
@@ -39,15 +50,17 @@ func RunRoot() {
 		loftlogr.WithGlobalKlog(true),
 	)
 	if err != nil {
-		klog.Fatal(err)
+		klog.Error(err)
+		osutil.Exit(1)
 	}
 	ctrl.SetLogger(logger)
 	ctx := logr.NewContext(context.Background(), logger)
 
 	// create a new command and execute
-	err = BuildRoot().ExecuteContext(ctx)
+	err = rootCmd.ExecuteContext(ctx)
 	if err != nil {
-		klog.Fatal(err)
+		klog.FromContext(ctx).Error(err, "error")
+		osutil.Exit(1)
 	}
 }
 
@@ -57,7 +70,12 @@ func BuildRoot() *cobra.Command {
 
 	// add top level commands
 	rootCmd.AddCommand(NewStartCommand())
-	rootCmd.AddCommand(NewCpCommand())
+	rootCmd.AddCommand(NewVersionCommand())
+	rootCmd.AddCommand(snapshot.NewSnapshotCommand())
+	rootCmd.AddCommand(snapshot.NewRestoreCommand())
+	rootCmd.AddCommand(NewPortForwardCommand())
 	rootCmd.AddCommand(debug.NewDebugCmd())
+	rootCmd.AddCommand(node.NewNodeCmd())
+	rootCmd.AddCommand(certs.NewCertsCmd())
 	return rootCmd
 }

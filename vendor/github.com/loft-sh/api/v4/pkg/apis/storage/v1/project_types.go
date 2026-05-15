@@ -32,6 +32,10 @@ const (
 	RancherLastAppliedHashAnnotation = "loft.sh/rancher-integration-last-applied-hash"
 )
 
+const (
+	ConditionTypeNamespaceTemplateSynced agentstoragev1.ConditionType = "NamespaceTemplateSynced"
+)
+
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -93,7 +97,6 @@ type ProjectSpec struct {
 	AllowedClusters []AllowedCluster `json:"allowedClusters,omitempty"`
 
 	// AllowedRunners are target runners that are allowed to target with
-	// DevPod environments.
 	// +optional
 	AllowedRunners []AllowedRunner `json:"allowedRunners,omitempty"`
 
@@ -106,6 +109,10 @@ type ProjectSpec struct {
 	// +optional
 	RequireTemplate RequireTemplate `json:"requireTemplate,omitempty"`
 
+	// RequirePreset configures if a preset is required for instance creation.
+	// +optional
+	RequirePreset RequirePreset `json:"requirePreset,omitempty"`
+
 	// Members are the users and teams that are part of this project
 	// +optional
 	Members []Member `json:"members,omitempty"`
@@ -113,6 +120,12 @@ type ProjectSpec struct {
 	// Access holds the access rights for users and teams
 	// +optional
 	Access []Access `json:"access,omitempty"`
+
+	// NamespaceTemplate defines metadata that should be applied to the project's namespace on creation.
+	// This is useful for environments where admission controllers (e.g., Kyverno)
+	// require specific labels or annotations on namespaces.
+	// +optional
+	NamespaceTemplate *ProjectNamespaceTemplate `json:"namespaceTemplate,omitempty"`
 
 	// NamespacePattern specifies template patterns to use for creating each space or virtual cluster's namespace
 	// +optional
@@ -129,10 +142,6 @@ type ProjectSpec struct {
 	// RancherIntegration holds information about Rancher Integration
 	// +optional
 	RancherIntegration *RancherIntegrationSpec `json:"rancher,omitempty"`
-
-	// DevPod holds DevPod specific configuration for project
-	// +optional
-	DevPod *DevPodProjectSpec `json:"devPod,omitempty"`
 }
 
 type RequireTemplate struct {
@@ -140,6 +149,20 @@ type RequireTemplate struct {
 	// By default, only admins are allowed to create a new instance without a template.
 	// +optional
 	Disabled bool `json:"disabled,omitempty"`
+}
+
+type RequirePreset struct {
+	// If true, all users within the project will not be allowed to create a new instance without a preset.
+	// By default, all users are allowed to create a new instance without a preset.
+	// +optional
+	Enabled bool `json:"disabled,omitempty"`
+}
+
+// ProjectNamespaceTemplate defines metadata to apply to the auto-created project namespace.
+type ProjectNamespaceTemplate struct {
+	// The namespace metadata
+	// +optional
+	TemplateMetadata `json:"metadata,omitempty"`
 }
 
 type NamespacePattern struct {
@@ -162,9 +185,8 @@ type Quotas struct {
 }
 
 var (
-	SpaceTemplateKind           = "SpaceTemplate"
-	VirtualClusterTemplateKind  = "VirtualClusterTemplate"
-	DevPodWorkspaceTemplateKind = "DevPodWorkspaceTemplate"
+	SpaceTemplateKind          = "SpaceTemplate"
+	VirtualClusterTemplateKind = "VirtualClusterTemplate"
 )
 
 type AllowedTemplate struct {
@@ -199,7 +221,7 @@ type Member struct {
 	Name string `json:"name,omitempty"`
 
 	// ClusterRole is the assigned role for the above member
-	ClusterRole string `json:"clusterRole,omitempty"`
+	ClusterRole string `json:"clusterRole"`
 }
 
 type AllowedRunner struct {
@@ -497,44 +519,6 @@ type SyncMembersSpec struct {
 	// being synced.
 	// +optional
 	RoleMapping map[string]string `json:"roleMapping,omitempty"`
-}
-
-type DevPodProjectSpec struct {
-	// Git defines additional git related settings like credentials
-	// +optional
-	Git *GitProjectSpec `json:"git,omitempty"`
-
-	// SSH defines additional ssh related settings like private keys, to be
-	// specified as base64 encoded strings.
-	// +optional
-	SSH *SSHProjectSpec `json:"ssh,omitempty"`
-
-	// FallbackImage defines an image all workspace will fall back to if no devcontainer.json could be detected
-	// +optional
-	FallbackImage string `json:"fallbackImage,omitempty"`
-}
-
-type GitProjectSpec struct {
-	// Token defines the token to use for authentication.
-	// +optional
-	Token string `json:"token,omitempty"`
-
-	// TokenSecretRef defines the project secret to use for token authentication.
-	// Will be used if `Token` is not provided.
-	// +optional
-	TokenProjectSecretRef *corev1.SecretKeySelector `json:"tokenSecretRef,omitempty"`
-}
-
-type SSHProjectSpec struct {
-	// Token defines the private ssh key to use for authentication,
-	// this is a base64 encoded string.
-	// +optional
-	Token string `json:"token,omitempty"`
-
-	// TokenSecretRef defines the project secret to use as private ssh key for authentication.
-	// Will be used if `Token` is not provided.
-	// +optional
-	TokenProjectSecretRef *corev1.SecretKeySelector `json:"tokenSecretRef,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

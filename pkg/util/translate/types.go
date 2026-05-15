@@ -7,12 +7,13 @@ import (
 )
 
 var (
-	NamespaceAnnotation     = "vcluster.loft.sh/object-namespace"
-	NameAnnotation          = "vcluster.loft.sh/object-name"
-	UIDAnnotation           = "vcluster.loft.sh/object-uid"
-	KindAnnotation          = "vcluster.loft.sh/object-kind"
-	HostNameAnnotation      = "vcluster.loft.sh/object-host-name"
-	HostNamespaceAnnotation = "vcluster.loft.sh/object-host-namespace"
+	NamespaceAnnotation      = "vcluster.loft.sh/object-namespace"
+	NameAnnotation           = "vcluster.loft.sh/object-name"
+	UIDAnnotation            = "vcluster.loft.sh/object-uid"
+	KindAnnotation           = "vcluster.loft.sh/object-kind"
+	HostNameAnnotation       = "vcluster.loft.sh/object-host-name"
+	HostNamespaceAnnotation  = "vcluster.loft.sh/object-host-namespace"
+	ImportedMarkerAnnotation = "vcluster.loft.sh/object-imported"
 )
 
 var (
@@ -25,11 +26,12 @@ var (
 	NamespaceLabelPrefix = "vcluster.loft.sh/ns-label"
 
 	// VClusterName is the vcluster name, usually set at start time
-	VClusterName        = "suffix"
-	VClusterServiceName = "vcluster"
+	VClusterName = "suffix"
 
 	ManagedAnnotationsAnnotation = "vcluster.loft.sh/managed-annotations"
 	ManagedLabelsAnnotation      = "vcluster.loft.sh/managed-labels"
+
+	K8sServiceNameLabel = "kubernetes.io/service-name"
 )
 
 var Default Translator = &singleNamespace{}

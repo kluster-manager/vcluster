@@ -3,15 +3,6 @@ templates:
   - statefulset.yaml
 
 tests:
-  - it: should not create control-plane
-    set:
-      experimental:
-        isolatedControlPlane:
-          headless: true
-    asserts:
-      - hasDocuments:
-          count: 0
-
   - it: image name
     set:
       controlPlane:
@@ -45,36 +36,6 @@ tests:
           path: spec.template.spec.containers[0].image
           value: ghcr.io/my-repo:custom-tag
 
-  - it: custom init container
-    set:
-      controlPlane:
-        distro:
-          k3s:
-            enabled: true
-            image:
-              registry: "ghcr.io"
-              repository: "test"
-              tag: "123"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[0].image
-          value: ghcr.io/test:123
-
-  - it: custom init container
-    set:
-      controlPlane:
-        distro:
-          k0s:
-            enabled: true
-            image:
-              registry: ""
-              repository: "k0s"
-              tag: "123"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[0].image
-          value: k0s:123
-
   - it: disables serviceLinks for sts etcd pod
     set:
       controlPlane:
@@ -91,22 +52,13 @@ tests:
         distro:
           k8s:
             enabled: true
-            controllerManager:
-              image:
-                registry: ""
-                repository: "k8s-controller"
-                tag: "123"
-            apiServer:
-              image:
-                registry: ""
-                repository: "k8s-api"
-                tag: "456"
+            image:
+              registry: ""
+              repository: "k8s-api"
+              tag: "456"
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: k8s-controller:123
-      - equal:
-          path: spec.template.spec.initContainers[2].image
+          path: spec.template.spec.initContainers[0].image
           value: k8s-api:456
 
   - it: custom init container
@@ -115,23 +67,15 @@ tests:
         distro:
           k8s:
             enabled: true
-            controllerManager:
-              image:
-                repository: "k8s-controller"
-                tag: "123"
-            apiServer:
-              image:
-                repository: "k8s-api"
-                tag: "456"
+            image:
+              repository: "k8s-controller"
+              tag: "123"
         advanced:
           defaultImageRegistry: "bbb.com"
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
+          path: spec.template.spec.initContainers[0].image
           value: bbb.com/k8s-controller:123
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: bbb.com/k8s-api:456
 
   - it: name & defaults
     release:
@@ -197,7 +141,7 @@ tests:
           value: vcluster
       - equal:
           path: spec.template.spec.terminationGracePeriodSeconds
-          value: 10
+          value: 15
       - equal:
           path: spec.volumeClaimTemplates[0].spec.accessModes[0]
           value: ReadWriteOnce
@@ -306,16 +250,16 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 7
+          count: 6
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 5
+          count: 3
 
   - it: plugin volumes 2
     set:
       controlPlane:
         distro:
-          k0s:
+          k8s:
             enabled: true
       plugin:
         test:
@@ -327,7 +271,7 @@ tests:
           value: StatefulSet
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 8
+          count: 6
       - lengthEqual:
           path: spec.template.spec.initContainers
           count: 2
@@ -340,17 +284,14 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 6
+          count: 5
       - lengthEqual:
           path: spec.template.spec.initContainers
-          count: 3
+          count: 1
 
   - it: add volumes
     set:
       controlPlane:
-        distro:
-          k3s:
-            enabled: true
         statefulSet:
           persistence:
             addVolumes:
@@ -362,7 +303,23 @@ tests:
             name: myVolume
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 8
+          count: 6
+
+  - it: add templated volumes
+    set:
+      controlPlane:
+        statefulSet:
+          persistence:
+            addVolumes:
+              - name: '{{ .Release.Name }}-myVolume'
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: RELEASE-NAME-myVolume
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 6
 
   - it: enable k8s
     set:
@@ -479,34 +436,11 @@ tests:
             name: data
             emptyDir: {}
 
-  - it: enable k0s
-    set:
-      controlPlane:
-        backingStore:
-          etcd:
-            deploy:
-              enabled: true
-        distro:
-          k0s:
-            enabled: true
-    asserts:
-      - equal:
-          path: kind
-          value: Deployment
-      - notExists:
-          path: spec.volumeClaimTemplates
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: data
-            emptyDir: {}
-
   - it: append distro env
     set:
       controlPlane:
         distro:
-          k3s:
-            enabled: true
+          k8s:
             env:
               - name: KEY
                 value: VALUE
@@ -578,8 +512,6 @@ tests:
               claimName: my-custom-pvc
 
   - it: k8s version not set, default tag images used for apiServer and controllerManager
-    chart:
-      version: "test-"
     set:
       controlPlane:
         distro:
@@ -587,65 +519,21 @@ tests:
             enabled: true
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.30.2
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v1.30.2
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.36.0
 
-  - it: k8s capabilities set
-    chart:
-      version: "test-v1.29.3"
+  - it: k8s override image tag
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            enabled: true
+            image:
+              tag: v99912
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.29.3
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v1.29.3
-
-  - it: k8s capabilities orbstack
-    chart:
-      version: "test-v1.29.3+orb1"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.29.3
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v1.29.3
-
-  - it: k8s capabilities invalid
-    chart:
-      version: "test-invalid"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.30.2
-
-  - it: k8s capabilities incomplete
-    chart:
-      version: "test-v1.22"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.30.2
-
-  - it: k8s capabilities incomplete 2
-    chart:
-      version: "test-1.22.11"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.30.2
-
-  - it: k8s capabilities incomplete 2
-    chart:
-      version: "test-v1.22.33"
-    asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.22.33
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v99912
 
   - it: k8s version sets image tag for apiServer and controllerManager
     set:
@@ -656,33 +544,23 @@ tests:
             version: v1.35.999
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.35.999
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v1.35.999
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.35.999
 
-  - it: k8s version set but overridden by image tag for apiServer and controllerManager
+  - it: k8s version set and not overridden by image tag
     set:
       controlPlane:
         distro:
           k8s:
             enabled: true
             version: v1.30.999
-            apiServer:
-              image:
-                tag: v99912
-            controllerManager:
-              image:
-                tag: v23123
+            image:
+              tag: v99912
 
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v23123
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v99912
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.30.999
 
   - it: k8s not version set but image tags for apiServer and controllerManager set
     set:
@@ -690,22 +568,30 @@ tests:
         distro:
           k8s:
             enabled: true
-            apiServer:
-              image:
-                tag: v99914
-            controllerManager:
-              image:
-                tag: v23127
+            image:
+              tag: v99914
 
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v23127
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-apiserver:v99914
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v99914
 
   - it: k8s version not set, default tag images used for apiServer and controllerManager (virtual scheduler enabled)
+    chart:
+      version: "test-"
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            enabled: true
+            scheduler:
+              enabled: true
+    asserts:
+    - equal:
+        path: spec.template.spec.initContainers[0].image
+        value: ghcr.io/loft-sh/kubernetes:v1.36.0
+
+  - it: k8s version not set, default tag images used for apiServer and controllerManager (virtual scheduler enabled, deprecated)
     chart:
       version: "test-"
     set:
@@ -718,16 +604,24 @@ tests:
             enabled: true
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.30.2
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-scheduler:v1.30.2
-      - equal:
-          path: spec.template.spec.initContainers[3].image
-          value: registry.k8s.io/kube-apiserver:v1.30.2
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.36.0
 
   - it: k8s version sets image tag for apiServer and controllerManager (virtual scheduler enabled)
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            enabled: true
+            version: v1.35.999
+            scheduler:
+              enabled: true
+    asserts:
+    - equal:
+        path: spec.template.spec.initContainers[0].image
+        value: ghcr.io/loft-sh/kubernetes:v1.35.999
+
+  - it: k8s version sets image tag for apiServer and controllerManager (virtual scheduler enabled, deprecated)
     set:
       controlPlane:
         distro:
@@ -739,76 +633,42 @@ tests:
             enabled: true
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v1.35.999
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-scheduler:v1.35.999
-      - equal:
-          path: spec.template.spec.initContainers[3].image
-          value: registry.k8s.io/kube-apiserver:v1.35.999
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.35.999
 
-  - it: k8s version set but overridden by image tag for apiServer and controllerManager (virtual scheduler enabled)
+  - it: k8s version set but not overridden by image tag for apiServer and controllerManager (virtual scheduler enabled)
     set:
       controlPlane:
         distro:
           k8s:
             enabled: true
             version: v1.30.999
-            apiServer:
-              image:
-                tag: v99912
-            controllerManager:
-              image:
-                tag: v23123
+            image:
+              tag: v99912
             scheduler:
-              image:
-                tag: v123654
-        advanced:
-          virtualScheduler:
-            enabled: true
-
+              enabled: true
     asserts:
-      - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v23123
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-scheduler:v123654
-      - equal:
-          path: spec.template.spec.initContainers[3].image
-          value: registry.k8s.io/kube-apiserver:v99912
+    - equal:
+        path: spec.template.spec.initContainers[0].image
+        value: ghcr.io/loft-sh/kubernetes:v1.30.999
 
-  - it: k8s not version set but image tags for apiServer and controllerManager set (virtual scheduler enabled)
+  - it: k8s version set but not overridden by image tag for apiServer and controllerManager (virtual scheduler enabled, deprecated)
     set:
       controlPlane:
         distro:
           k8s:
             enabled: true
-            apiServer:
-              image:
-                tag: v99914
-            controllerManager:
-              image:
-                tag: v23127
-            scheduler:
-              image:
-                tag: v123656
-
+            version: v1.30.999
+            image:
+              tag: v99912
         advanced:
           virtualScheduler:
             enabled: true
 
     asserts:
       - equal:
-          path: spec.template.spec.initContainers[1].image
-          value: registry.k8s.io/kube-controller-manager:v23127
-      - equal:
-          path: spec.template.spec.initContainers[2].image
-          value: registry.k8s.io/kube-scheduler:v123656
-      - equal:
-          path: spec.template.spec.initContainers[3].image
-          value: registry.k8s.io/kube-apiserver:v99914
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.30.999
 
   - it: custom dnsPolicy
     set:
@@ -846,6 +706,53 @@ tests:
           path: spec.template.spec.dnsConfig.options[0].value
           value: "2"
 
+  - it: sets host aliases
+    set:
+      controlPlane:
+        statefulSet:
+          hostAliases:
+            - ip: "127.0.0.1"
+              hostnames:
+                - "myadded.examplehostname.com"
+            - ip: "10.0.1.5"
+              hostnames:
+                - "custom-db.internal"
+                - "db-alias"
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.hostAliases
+          count: 2
+      - equal:
+          path: spec.template.spec.hostAliases[0].ip
+          value: "127.0.0.1"
+      - equal:
+          path: spec.template.spec.hostAliases[0].hostnames[0]
+          value: "myadded.examplehostname.com"
+      - equal:
+          path: spec.template.spec.hostAliases[1].ip
+          value: "10.0.1.5"
+      - equal:
+          path: spec.template.spec.hostAliases[1].hostnames[0]
+          value: "custom-db.internal"
+      - equal:
+          path: spec.template.spec.hostAliases[1].hostnames[1]
+          value: "db-alias"
+
+  - it: sets runtimeClassName
+    set:
+      controlPlane:
+        statefulSet:
+          runtimeClassName: "gvisor"
+    asserts:
+      - equal:
+          path: spec.template.spec.runtimeClassName
+          value: "gvisor"
+
+  - it: does not set runtimeClassName by default
+    asserts:
+      - notExists:
+          path: spec.template.spec.runtimeClassName
+
   - it: must use StatefulSet for embedded etcd
     set:
       controlPlane:
@@ -879,3 +786,301 @@ tests:
       - equal:
           path: kind
           value: StatefulSet
+
+  - it: sync custom resources
+    set:
+      sync:
+        toHost:
+          customResources:
+            test.cert-manager.io:
+              enabled: true
+              patches:
+                - path: spec.dnsNames[*]
+                  expression: "value.startsWith('www.') ? value.slice(4) : value"
+                  reverseExpression: '"www."+value'
+    asserts:
+      - equal:
+          path: kind
+          value: StatefulSet
+
+  - it: fails when you set both exportKubeConfig.secret and exportKubeConfig.additionalSecrets
+    set:
+      exportKubeConfig:
+        secret:
+          name: my-secret
+        additionalSecrets:
+          - name: another-secret
+    asserts:
+      - failedTemplate:
+          errorMessage: "exportKubeConfig.secret and exportKubeConfig.additionalSecrets cannot be set at the same time"
+
+  - it: fails when additional secret does not have at least name or namespace
+    set:
+      exportKubeConfig:
+        additionalSecrets:
+          - name: my-secret
+            context: my-context
+          - server: my-server
+    asserts:
+      - failedTemplate:
+          errorMessage: "additional secret must have name and/or namespace set, found: {\"server\":\"my-server\"}"
+
+  - it: must use Deployment for external etcd
+    set:
+      controlPlane:
+        backingStore:
+          etcd:
+            external:
+              enabled: true
+    asserts:
+      - equal:
+          path: kind
+          value: Deployment
+
+  - it: private nodes k8s full image
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            image:
+              tag: v1.35.999
+      privateNodes:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.35.999-full
+
+  - it: private nodes k8s full image version
+    set:
+      controlPlane:
+        distro:
+          k8s:
+            version: v1.35.999
+      privateNodes:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/loft-sh/kubernetes:v1.35.999-full
+
+  - it: sets custom probe configuration
+    set:
+      controlPlane:
+        statefulSet:
+          probes:
+            livenessProbe:
+              enabled: true
+              failureThreshold: 70
+              initialDelaySeconds: 70
+              timeoutSeconds: 10
+              periodSeconds: 9
+            readinessProbe:
+              enabled: true
+              failureThreshold: 70
+              timeoutSeconds: 6
+              periodSeconds: 8
+            startupProbe:
+              enabled: true
+              failureThreshold: 350
+              timeoutSeconds: 7
+              periodSeconds: 8
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.failureThreshold
+          value: 70
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.initialDelaySeconds
+          value: 70
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.timeoutSeconds
+          value: 10
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.periodSeconds
+          value: 9
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.failureThreshold
+          value: 70
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.timeoutSeconds
+          value: 6
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 8
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 350
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.timeoutSeconds
+          value: 7
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 8
+
+
+  - it: uses default probe values when none are overridden
+    set:
+      controlPlane:
+        statefulSet:
+          probes:
+            livenessProbe:
+              enabled: true
+            readinessProbe:
+              enabled: true
+            startupProbe:
+              enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.initialDelaySeconds
+          value: 60
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.periodSeconds
+          value: 2
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.timeoutSeconds
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.failureThreshold
+          value: 60
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 2
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.timeoutSeconds
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.failureThreshold
+          value: 60
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 6
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.timeoutSeconds
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 300
+
+  - it: should set logging format to json
+    set:
+      logging:
+        encoding: json
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="LOFT_LOG_ENCODING")].value
+          value: json
+
+  - it: should set default logging format to console
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name=="LOFT_LOG_ENCODING")].value
+          value: console
+
+  - it: should add init containers
+    set:
+      controlPlane:
+        statefulSet:
+          initContainers:
+            - name: init-container
+              image: init-container
+              command: ["/bin/sh", "-c", "echo 'init-container'"]
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: init-container
+      - equal:
+          path: spec.template.spec.initContainers[1].image
+          value: init-container
+      - equal:
+          path: spec.template.spec.initContainers[1].command[0]
+          value: /bin/sh
+      - equal:
+          path: spec.template.spec.initContainers[1].command[1]
+          value: -c
+      - equal:
+          path: spec.template.spec.initContainers[1].command[2]
+          value: echo 'init-container'
+
+  - it: should add sidecar containers
+    set:
+      controlPlane:
+        statefulSet:
+          sidecarContainers:
+            - name: sidecar-container
+              image: sidecar-container
+              command: ["/bin/sh", "-c", "echo 'sidecar-container'"]
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: sidecar-container
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: sidecar-container
+      - equal:
+          path: spec.template.spec.containers[1].command[0]
+          value: /bin/sh
+      - equal:
+          path: spec.template.spec.containers[1].command[1]
+          value: -c
+      - equal:
+          path: spec.template.spec.containers[1].command[2]
+          value: echo 'sidecar-container'
+
+  - it: should add NET_ADMIN and NET_RAW capabilities when kube-vip is enabled
+    set:
+      controlPlane:
+        advanced:
+          kubeVip:
+            enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add[0]
+          value: NET_ADMIN
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add[1]
+          value: NET_RAW
+
+  - it: should merge and deduplicate kube-vip capabilities with custom security context
+    set:
+      controlPlane:
+        advanced:
+          kubeVip:
+            enabled: true
+        statefulSet:
+          security:
+            containerSecurityContext:
+              runAsUser: 1000
+              capabilities:
+                add:
+                  - NET_ADMIN
+                  - SYS_TIME
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 1000
+      - lengthEqual:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          count: 3
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: NET_ADMIN
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: NET_RAW
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_TIME
+
+  - it: should apply default security context when kube-vip is disabled
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 0
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.capabilities

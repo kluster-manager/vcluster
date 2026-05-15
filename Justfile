@@ -1,56 +1,45 @@
 set positional-arguments
 
-[private]
-alias align := check-structalign
-
 timestamp := `date +%s`
 
-alias c := create
-alias d := delete
+GOOS := env("GOOS", `go env GOOS`)
+GOARCH := env("GOARCH", `go env GOARCH`)
+GOBIN := env("GOBIN", `go env GOPATH`+"/bin")
+PRIVATE_GO_ENV := "GOPRIVATE=github.com/loft-sh/* GONOSUMDB=github.com/loft-sh/*"
+
+DIST_FOLDER := if GOARCH == "amd64" { "dist/vcluster_linux_amd64_v1" } else if GOARCH == "arm64" { "dist/vcluster_linux_arm64_v8.0" } else { "unknown" }
+DIST_FOLDER_CLI := if GOARCH == "amd64" { "dist/vcluster-cli_" + GOOS + "_amd64_v1" } else if GOARCH == "arm64" { "dist/vcluster-cli_" + GOOS + "_arm64_v8.0" } else { "unknown" }
+
+ASSETS_RUN := "go run -mod vendor ./hack/assets/cmd/main.go"
 
 _default:
   @just --list
 
 # --- Build ---
 
-# Build the vcluster binary
+# Build the vcluster-cli binary
+build-cli-snapshot:
+  goreleaser build --id vcluster-cli --single-target --snapshot --clean
+  mv {{DIST_FOLDER_CLI}}/vcluster {{GOBIN}}/vcluster
+
+# Build the vcluster binary (we force linux here to allow building on mac os or windows)
 build-snapshot:
-  TELEMETRY_PRIVATE_KEY="" goreleaser build --snapshot --clean --single-target
+  GOOS=linux goreleaser build --id vcluster --single-target --snapshot --clean
+  cp Dockerfile.release {{DIST_FOLDER}}/Dockerfile
+  cd {{DIST_FOLDER}} && docker buildx build --load . -t ghcr.io/loft-sh/vcluster:dev-next
 
-# Build the vcluster release binary in snapshot mode
-release-snapshot: gen-license-report
-  TELEMETRY_PRIVATE_KEY="" goreleaser release --snapshot --clean
+# --- vind ---
 
-# --- Code quality ---
+# Create a local vind cluster
+create-vind:
+  vcluster delete vcluster --driver docker 2>/dev/null || true
+  vcluster use driver docker
+  vcluster create vcluster --connect=false
+  vcluster connect vcluster --update-current
 
-# Run golangci-lint for all packages
-lint *ARGS:
-  [ -f ./custom-gcl ] || golangci-lint custom
-  ./custom-gcl cache clean
-  ./custom-gcl run {{ARGS}}
-
-# Check struct memory alignment and print potential improvements
-[no-exit-message]
-check-structalign *ARGS:
-  go run github.com/dkorunic/betteralign/cmd/betteralign@latest {{ARGS}} ./...
-
-# --- Kind ---
-
-# Create a kubernetes cluster using the specified distro
-create distro="kind":
-  just create-{{distro}}
-
-# Create a kubernetes cluster for the specified distro
-delete distro="kind":
-  just delete-{{distro}}
-
-# Create a local kind cluster
-create-kind:
-  kind create cluster -n vcluster
-
-# Delete the local kind cluster
-delete-kind:
-  kind delete cluster -n vcluster
+# Delete the local vind cluster
+delete-vind:
+  vcluster delete vcluster --driver docker
 
 # --- Build ---
 
@@ -65,28 +54,28 @@ copy-assets:
   mkdir -p ./release
   cp -a assets/. release/
 
-# Generate the vcluster images file
+# Generate the vcluster latest/minimal images file
 [private]
-generate-vcluster-images version="0.0.0":
-  go run -mod vendor ./hack/assets/main.go {{ version }} > ./release/vcluster-images.txt
+generate-vcluster-latest-images version="0.0.0":
+  {{ASSETS_RUN}} {{ version }} > ./release/images.txt
+
+# Generate the vcluster optional images file
+[private]
+generate-vcluster-optional-images version="0.0.0":
+  {{ASSETS_RUN}} --optional {{ version }} > ./release/images-optional.txt
 
 # Generate versioned vCluster image files for multiple versions and distros
 [private]
 generate-matrix-specific-images version="0.0.0":
   #!/usr/bin/env bash
 
-  distros=("k8s" "k3s" "k0s")
-  versions=("1.30" "1.29" "1.28")
-
+  distros=(`{{ASSETS_RUN}} --list-distros`)
+  versions=(`{{ASSETS_RUN}}  --list-versions`)
   for distro in "${distros[@]}"; do
     for version in "${versions[@]}"; do
-      go run -mod vendor ./hack/assets/separate/main.go -kubernetes-distro=$distro -kubernetes-version=$version -vcluster-version={{ version }} > ./release/vcluster-images-$distro-$version.txt
+      {{ASSETS_RUN}} --kubernetes-distro=$distro --kubernetes-version=$version {{ version }} > ./release/vcluster-images-$distro-$version.txt
     done
   done
-
-# Generate the CLI docs
-generate-cli-docs:
-  go run -mod vendor -tags pro ./hack/docs/main.go
 
 # Generate the vcluster.yaml config schema
 generate-config-schema:
@@ -97,46 +86,69 @@ generate-config-schema:
 embed-chart version="0.0.0":
   RELEASE_VERSION={{ version }} go generate -tags embed_chart ./...
 
-# Run e2e tests
-e2e distribution="k3s" path="./test/e2e" multinamespace="false": create-kind && delete-kind
-  echo "Execute test suites ({{ distribution }}, {{ path }}, {{ multinamespace }})"
+test-chart:
+  helm unittest chart
 
-  TELEMETRY_PRIVATE_KEY="" goreleaser build --snapshot --clean
+# --- Lint ---
 
-  cp dist/vcluster_linux_$(go env GOARCH | sed s/amd64/amd64_v1/g)/vcluster ./vcluster
-  docker build -t vcluster:e2e-latest -f Dockerfile.release --build-arg TARGETARCH=$(uname -m) --build-arg TARGETOS=linux .
-  rm ./vcluster
+# Rebuild tools/golangci-lint if sources changed or binary is missing
+[private]
+_ensure-linters:
+  #!/usr/bin/env bash
+  if [ ! -f ./tools/golangci-lint ] || \
+     [ -n "$(find .custom-gcl.yml -newer ./tools/golangci-lint \( -name '*.yml' \) 2>/dev/null | head -1)" ]; then
+    echo "Custom linters changed - rebuilding tools/golangci-lint..."
+    {{PRIVATE_GO_ENV}} golangci-lint custom
+  fi
 
-  kind load docker-image vcluster:e2e-latest -n vcluster
+# Run golangci-lint for all packages
+lint *ARGS: _ensure-linters
+  ./tools/golangci-lint cache clean
+  ./tools/golangci-lint run {{ARGS}} -- ./...
 
-  cp test/commonValues.yaml dist/commonValues.yaml
+# Build the custom golangci-lint binary (required after linter code changes)
+build-linters:
+  golangci-lint custom
 
-  sed -i.bak "s|REPLACE_REPOSITORY_NAME|vcluster|g" dist/commonValues.yaml
-  sed -i.bak "s|REPLACE_TAG_NAME|e2e-latest|g" dist/commonValues.yaml
-  rm dist/commonValues.yaml.bak
+# Run custom linters against e2e-next (with autofix)
+lint-e2e: _ensure-linters
+  ./tools/golangci-lint run --fix -- ./e2e-next/...
 
-  sed -i.bak "s|kind-control-plane|vcluster-control-plane|g" dist/commonValues.yaml
-  rm dist/commonValues.yaml.bak
+setup-csi-volume-snapshots:
+  # Deploy upstream CSI volume snapshot CRDs and snapshot-controller
+  kubectl kustomize https://github.com/kubernetes-csi/external-snapshotter/client/config/crd | kubectl create -f -
+  kubectl kustomize https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller | kubectl create -f -
 
-  ./dist/vcluster-cli_$(go env GOOS)_$(go env GOARCH | sed s/amd64/amd64_v1/g)/vcluster \
-    create vcluster -n vcluster \
-    --create-namespace \
-    --debug \
-    --connect=false \
-    --distro={{ distribution }} \
-    --local-chart-dir ./chart/ \
-    -f ./dist/commonValues.yaml \
-    -f {{ path }}/values.yaml \
-    $([[ "{{ multinamespace }}" = "true" ]] && echo "-f ./test/multins_values.yaml" || echo "")
+  # Deploy CSI driver, StorageClass and VolumeSnapshotClass
+  temp_git_dir=$(mktemp -d) && \
+    git clone https://github.com/kubernetes-csi/csi-driver-host-path.git $temp_git_dir && \
+    $temp_git_dir/deploy/kubernetes-latest/deploy.sh && \
+    kubectl apply -f $temp_git_dir/examples/csi-storageclass.yaml && \
+    kubectl apply -f $temp_git_dir/examples/csi-volumesnapshotclass.yaml && \
+    kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
+      snapshot.storage.kubernetes.io/is-default-class="true" && \
+    rm -rf $temp_git_dir
 
-  kubectl wait --for=condition=ready pod -l app=vcluster -n vcluster --timeout=300s
+  # wait for snapshot-controller to be ready
+  kubectl wait --for=condition=Available -n kube-system deploy/snapshot-controller --timeout=60s
 
-  cd {{path}} && VCLUSTER_SUFFIX=vcluster \
-    VCLUSTER_NAME=vcluster \
-    VCLUSTER_NAMESPACE=vcluster \
-    MULTINAMESPACE_MODE={{ multinamespace }} \
-    KIND_NAME=vcluster \
-    go test -v -ginkgo.v -ginkgo.skip='.*NetworkPolicy.*' -ginkgo.fail-fast
+#e2e-next tests
+@dev-e2e label-filter="core" image="ghcr.io/loft-sh/vcluster:dev-next" *ARGS='': \
+  (setup label-filter image) \
+  (run-e2e label-filter image "false") \
+  (teardown label-filter)
+
+@run-e2e label-filter="core" image="ghcr.io/loft-sh/vcluster:dev-next" teardown="true":
+  ginkgo -timeout=0 -v --procs=8 --label-filter="{{label-filter}}" ./e2e-next -- --vcluster-image="{{image}}" --teardown={{teardown}}
+
+@iterate-e2e label-filter="core" image="ghcr.io/loft-sh/vcluster:dev-next": \
+  (run-e2e label-filter image "false")
+
+@setup label-filter="core" image="ghcr.io/loft-sh/vcluster:dev-next":
+  GINKGO_EDITOR_INTEGRATION=just ginkgo -timeout=0 -v --label-filter="{{label-filter}}" --silence-skips ./e2e-next -- --vcluster-image="{{image}}" --setup-only
+
+@teardown label-filter="core":
+  GINKGO_EDITOR_INTEGRATION=just ginkgo -timeout=0 -v --label-filter="{{label-filter}}" --silence-skips ./e2e-next -- --teardown-only
 
 cli version="0.0.0" *ARGS="":
   RELEASE_VERSION={{ version }} go generate -tags embed_chart ./...
@@ -161,3 +173,35 @@ gen-license-report:
   go-licenses save --save_path=./licenses --ignore github.com/loft-sh ./...
 
   cp -r ./licenses ./cmd/vclusterctl/cmd/credits
+
+build-dev-image tag="":
+  TELEMETRY_PRIVATE_KEY="" goreleaser build --snapshot --clean
+
+  cp dist/vcluster_linux_$(go env GOARCH | sed s/amd64/amd64_v1/g | sed s/arm64/arm64_v8.0/g)/vcluster ./vcluster
+  docker build -t vcluster:dev-{{tag}} -f Dockerfile.release --build-arg TARGETARCH=$(uname -m) --build-arg TARGETOS=linux .
+  rm ./vcluster
+
+run-conformance k8s_version="1.31.1" mode="conformance-lite" tag="conf": (create-conformance k8s_version) (build-dev-image tag)
+  minikube image load vcluster:dev-{{tag}}
+
+  vcluster create vcluster -n vcluster -f ./conformance/v1.31/vcluster.yaml
+
+  sonobuoy run --mode={{mode}} --level=debug
+
+conformance-status:
+  sonobuoy status
+
+conformance-logs:
+  sonobuoy logs
+
+dev-conformance *ARGS:
+  devspace dev --profile test-conformance --namespace vcluster {{ARGS}}
+
+create-conformance k8s_version="1.31.1":
+  minikube start --kubernetes-version {{k8s_version}} --nodes=2
+  minikube addons enable metrics-server
+
+delete-conformance:
+  minikube delete
+
+recreate-conformance: delete-conformance create-conformance

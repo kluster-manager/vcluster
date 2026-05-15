@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/scheme"
 	"github.com/loft-sh/vcluster/pkg/server/handler"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
+	"github.com/loft-sh/vcluster/pkg/util/osutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -63,6 +63,11 @@ func applyOperation(ctx context.Context, operationFunc wait.ConditionWithContext
 
 func deleteOperation(ctrlCtx *synccontext.ControllerContext, groupVersion schema.GroupVersion) wait.ConditionWithContextFunc {
 	return func(ctx context.Context) (bool, error) {
+		if err := disableDeletionProtection(ctx, ctrlCtx.VirtualManager.GetClient(), groupVersion); err != nil {
+			klog.Errorf("error disabling deletion protection for api service %v", err)
+			return false, nil
+		}
+
 		err := ctrlCtx.VirtualManager.GetClient().Delete(ctx, &apiregistrationv1.APIService{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: groupVersion.Version + "." + groupVersion.Group,
@@ -81,7 +86,7 @@ func deleteOperation(ctrlCtx *synccontext.ControllerContext, groupVersion schema
 	}
 }
 
-func createOperation(ctrlCtx *synccontext.ControllerContext, serviceName string, hostPort int, groupVersion schema.GroupVersion) wait.ConditionWithContextFunc {
+func createOperation(ctrlCtx *synccontext.ControllerContext, serviceName string, hostPort int, groupVersion schema.GroupVersion, additionalLabels map[string]string) wait.ConditionWithContextFunc {
 	return func(ctx context.Context) (bool, error) {
 		service := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
@@ -90,6 +95,9 @@ func createOperation(ctrlCtx *synccontext.ControllerContext, serviceName string,
 			},
 		}
 		_, err := controllerutil.CreateOrUpdate(ctx, ctrlCtx.VirtualManager.GetClient(), service, func() error {
+			for k, v := range additionalLabels {
+				metav1.SetMetaDataLabel(&service.ObjectMeta, k, v)
+			}
 			service.Spec.Type = corev1.ServiceTypeExternalName
 			service.Spec.ExternalName = "localhost"
 			service.Spec.Ports = []corev1.ServicePort{
@@ -126,6 +134,9 @@ func createOperation(ctrlCtx *synccontext.ControllerContext, serviceName string,
 			},
 		}
 		_, err = controllerutil.CreateOrUpdate(ctx, ctrlCtx.VirtualManager.GetClient(), apiService, func() error {
+			for k, v := range additionalLabels {
+				metav1.SetMetaDataLabel(&apiService.ObjectMeta, k, v)
+			}
 			apiService.Spec = apiServiceSpec
 			return nil
 		})
@@ -142,6 +153,31 @@ func createOperation(ctrlCtx *synccontext.ControllerContext, serviceName string,
 	}
 }
 
+func StartAPIServer(ctx *synccontext.ControllerContext, port int, h http.Handler) (*http.Server, error) {
+	tlsCertFile := ctx.Config.VirtualClusterKubeConfig().ServerCACert
+	tlsKeyFile := ctx.Config.VirtualClusterKubeConfig().ServerCAKey
+
+	h = genericapifilters.WithRequestInfo(h, &request.RequestInfoFactory{
+		APIPrefixes:          sets.NewString("api", "apis"),
+		GrouplessAPIPrefixes: sets.NewString("api"),
+	})
+
+	server := &http.Server{
+		Addr:    "localhost:" + strconv.Itoa(port),
+		Handler: h,
+	}
+
+	go func() {
+		klog.Infof("Starting API server on localhost:%d...", port)
+		if err := server.ListenAndServeTLS(tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
+			klog.FromContext(ctx).Error(err, "error starting API server")
+			osutil.Exit(1)
+		}
+	}()
+
+	return server, nil
+}
+
 func StartAPIServiceProxy(
 	ctx *synccontext.ControllerContext,
 	targetServiceName,
@@ -150,10 +186,7 @@ func StartAPIServiceProxy(
 	hostPort int,
 	extraHandlers ...func(h http.Handler) http.Handler,
 ) error {
-	tlsCertFile := ctx.Config.VirtualClusterKubeConfig().ServerCACert
-	tlsKeyFile := ctx.Config.VirtualClusterKubeConfig().ServerCAKey
-
-	hostConfig := rest.CopyConfig(ctx.LocalManager.GetConfig())
+	hostConfig := rest.CopyConfig(ctx.HostManager.GetConfig())
 	hostConfig.Host = "https://" + targetServiceName + "." + targetServiceNamespace
 	if targetPort > 0 {
 		hostConfig.Host = hostConfig.Host + ":" + strconv.Itoa(targetPort)
@@ -179,26 +212,8 @@ func StartAPIServiceProxy(
 		h = extraHandler(h)
 	}
 
-	h = genericapifilters.WithRequestInfo(h, &request.RequestInfoFactory{
-		APIPrefixes:          sets.NewString("api", "apis"),
-		GrouplessAPIPrefixes: sets.NewString("api"),
-	})
-
-	server := &http.Server{
-		Addr:    "localhost:" + strconv.Itoa(hostPort),
-		Handler: h,
-	}
-
-	go func() {
-		klog.Infof("Listening apiservice proxy on localhost:%d...", hostPort)
-		err = server.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
-		if err != nil {
-			klog.FromContext(ctx).Error(err, "error listening for apiservice proxy and serve tls")
-			os.Exit(1)
-		}
-	}()
-
-	return nil
+	_, err = StartAPIServer(ctx, hostPort, h)
+	return err
 }
 
 func serveHandler(ctx context.Context, next http.Handler) http.Handler {
@@ -257,8 +272,16 @@ func isAPIServiceProxyPathAllowed(method, path string) bool {
 	return false
 }
 
-func RegisterAPIService(ctx *synccontext.ControllerContext, serviceName string, hostPort int, groupVersion schema.GroupVersion) error {
-	return applyOperation(ctx, createOperation(ctx, serviceName, hostPort, groupVersion))
+func RegisterAPIService(ctx *synccontext.ControllerContext, serviceName string, hostPort int, groupVersion schema.GroupVersion, protectionTag string) error {
+	var additionalLabels map[string]string
+	if protectionTag != "" {
+		labels, err := enableDeletionProtection(ctx, ctx.VirtualManager.GetClient(), protectionTag)
+		if err != nil {
+			return err
+		}
+		additionalLabels = labels
+	}
+	return applyOperation(ctx, createOperation(ctx, serviceName, hostPort, groupVersion, additionalLabels))
 }
 
 func DeregisterAPIService(ctx *synccontext.ControllerContext, groupVersion schema.GroupVersion) error {

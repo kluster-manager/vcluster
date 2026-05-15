@@ -7,27 +7,30 @@ import (
 	"time"
 
 	"github.com/loft-sh/log"
+	vclusterconfig "github.com/loft-sh/vcluster/pkg/config"
 	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/kube"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	"github.com/pkg/errors"
+	appsv1 "k8s.io/api/apps/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // PauseVCluster pauses a running vcluster
-func PauseVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, namespace string, log log.BaseLogger) error {
+func PauseVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, namespace string, isRestore bool, log log.BaseLogger) error {
 	// scale down vcluster itself
 	labelSelector := "app=vcluster,release=" + name
-	found, err := scaleDownStatefulSet(ctx, kubeClient, labelSelector, namespace, log)
+	found, err := scaleDownStatefulSet(ctx, kubeClient, labelSelector, namespace, isRestore, log)
 	if err != nil {
 		return err
 	} else if !found {
-		found, err = scaleDownDeployment(ctx, kubeClient, labelSelector, namespace, log)
+		found, err = scaleDownDeployment(ctx, kubeClient, labelSelector, namespace, isRestore, log)
 		if err != nil {
 			return err
 		} else if !found {
@@ -35,21 +38,23 @@ func PauseVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, 
 		}
 
 		// scale down kube api server
-		_, err = scaleDownDeployment(ctx, kubeClient, "app=vcluster-api,release="+name, namespace, log)
+		_, err = scaleDownDeployment(ctx, kubeClient, "app=vcluster-api,release="+name, namespace, isRestore, log)
 		if err != nil {
 			return err
 		}
 
 		// scale down kube controller
-		_, err = scaleDownDeployment(ctx, kubeClient, "app=vcluster-controller,release="+name, namespace, log)
+		_, err = scaleDownDeployment(ctx, kubeClient, "app=vcluster-controller,release="+name, namespace, isRestore, log)
 		if err != nil {
 			return err
 		}
 
 		// scale down etcd
-		_, err = scaleDownStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, log)
-		if err != nil {
-			return err
+		if !isRestore {
+			_, err = scaleDownStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, isRestore, log)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -57,14 +62,13 @@ func PauseVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, 
 }
 
 // DeletePods deletes all pods associated with a running vcluster
-func DeletePods(ctx context.Context, kubeClient *kubernetes.Clientset, labelSelector, namespace string, log log.BaseLogger) error {
+func DeletePods(ctx context.Context, kubeClient *kubernetes.Clientset, labelSelector, namespace string) error {
 	list, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return err
 	}
 
 	if len(list.Items) > 0 {
-		log.Infof("Relaunching %d vcluster pods", len(list.Items))
 		for _, item := range list.Items {
 			err = kubeClient.CoreV1().Pods(namespace).Delete(ctx, item.Name, metav1.DeleteOptions{})
 			if err != nil {
@@ -102,7 +106,7 @@ func DeleteMultiNamespaceVClusterWorkloads(ctx context.Context, client *kubernet
 
 		for _, pod := range podList.Items {
 			err := client.CoreV1().Pods(ns.Name).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-			if err != nil {
+			if err != nil && !kerrors.IsNotFound(err) {
 				return errors.Wrapf(err, "error deleting pod %s/%s", ns.Name, pod.Name)
 			}
 		}
@@ -111,7 +115,7 @@ func DeleteMultiNamespaceVClusterWorkloads(ctx context.Context, client *kubernet
 	return nil
 }
 
-func scaleDownDeployment(ctx context.Context, kubeClient kubernetes.Interface, labelSelector, namespace string, log log.BaseLogger) (bool, error) {
+func scaleDownDeployment(ctx context.Context, kubeClient kubernetes.Interface, labelSelector, namespace string, isRestore bool, log log.BaseLogger) (bool, error) {
 	list, err := kubeClient.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return false, err
@@ -119,61 +123,44 @@ func scaleDownDeployment(ctx context.Context, kubeClient kubernetes.Interface, l
 		return false, nil
 	}
 
-	zero := int32(0)
 	for _, item := range list.Items {
 		if IsPaused(&item) {
 			log.Infof("vcluster %s/%s is already paused", namespace, item.Name)
 			return true, nil
-		} else if item.Spec.Replicas != nil && *item.Spec.Replicas == 0 {
-			continue
 		}
 
-		originalObject := item.DeepCopy()
-		if item.Annotations == nil {
-			item.Annotations = map[string]string{}
-		}
-
-		replicas := 1
-		if item.Spec.Replicas != nil {
-			replicas = int(*item.Spec.Replicas)
-		}
-
-		item.Annotations[constants.PausedAnnotation] = "true"
-		item.Annotations[constants.PausedReplicasAnnotation] = strconv.Itoa(replicas)
-		item.Annotations[constants.PausedDateAnnotation] = time.Now().Format("2006-01-02T15:04:05.000Z")
-		item.Spec.Replicas = &zero
-
-		patch := client.MergeFrom(originalObject)
-		data, err := patch.Data(&item)
+		result, err := prepareScaleDown(ctx, kubeClient, &item, isRestore)
 		if err != nil {
-			return false, errors.Wrap(err, "create deployment patch")
+			return false, fmt.Errorf("prepare deployment scale down: %w", err)
 		}
 
-		// patch deployment
 		log.Infof("Scale down deployment %s/%s...", namespace, item.Name)
-		_, err = kubeClient.AppsV1().Deployments(namespace).Patch(ctx, item.Name, patch.Type(), data, metav1.PatchOptions{})
+		_, err = kubeClient.AppsV1().Deployments(namespace).Patch(ctx, item.Name, result.patchType, result.patchData, metav1.PatchOptions{})
 		if err != nil {
-			return false, errors.Wrap(err, "patch deployment")
+			return false, fmt.Errorf("patch deployment: %w", err)
 		}
 
-		// wait until deployment is scaled down
-		err = wait.PollUntilContextTimeout(ctx, time.Second, time.Minute*3, true, func(ctx context.Context) (done bool, err error) {
-			deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, item.Name, metav1.GetOptions{})
-			if err != nil {
-				return false, err
-			}
+		if result.alreadyScaledDown {
+			log.Infof("Deployment %s/%s was already scaled down, set annotation %s on it", namespace, item.Name, constants.PausedAnnotation(isRestore))
+		} else {
+			err = wait.PollUntilContextTimeout(ctx, time.Second, time.Minute*3, true, func(ctx context.Context) (done bool, err error) {
+				deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, item.Name, metav1.GetOptions{})
+				if err != nil {
+					return false, err
+				}
 
-			return deployment.Status.Replicas == 0, nil
-		})
-		if err != nil {
-			return false, errors.Wrap(err, "wait for deployment scaled down")
+				return deployment.Status.Replicas == 0, nil
+			})
+			if err != nil {
+				return false, fmt.Errorf("wait for deployment scaled down: %w", err)
+			}
 		}
 	}
 
 	return true, nil
 }
 
-func scaleDownStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, labelSelector, namespace string, log log.BaseLogger) (bool, error) {
+func scaleDownStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, labelSelector, namespace string, isRestore bool, log log.BaseLogger) (bool, error) {
 	list, err := kubeClient.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return false, err
@@ -181,69 +168,121 @@ func scaleDownStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, 
 		return false, nil
 	}
 
-	zero := int32(0)
 	for _, item := range list.Items {
 		if IsPaused(&item) {
 			log.Infof("vcluster %s/%s is already paused", namespace, item.Name)
 			return true, nil
-		} else if item.Spec.Replicas != nil && *item.Spec.Replicas == 0 {
-			continue
 		}
 
-		originalObject := item.DeepCopy()
-		if item.Annotations == nil {
-			item.Annotations = map[string]string{}
-		}
-
-		replicas := 1
-		if item.Spec.Replicas != nil {
-			replicas = int(*item.Spec.Replicas)
-		}
-
-		item.Annotations[constants.PausedAnnotation] = "true"
-		item.Annotations[constants.PausedReplicasAnnotation] = strconv.Itoa(replicas)
-		item.Annotations[constants.PausedDateAnnotation] = time.Now().Format("2006-01-02T15:04:05.000Z")
-		item.Spec.Replicas = &zero
-
-		patch := client.MergeFrom(originalObject)
-		data, err := patch.Data(&item)
+		result, err := prepareScaleDown(ctx, kubeClient, &item, isRestore)
 		if err != nil {
-			return false, errors.Wrap(err, "create statefulSet patch")
+			return false, fmt.Errorf("prepare statefulSet scale down: %w", err)
 		}
 
-		// patch deployment
 		log.Infof("Scale down statefulSet %s/%s...", namespace, item.Name)
-		_, err = kubeClient.AppsV1().StatefulSets(namespace).Patch(ctx, item.Name, patch.Type(), data, metav1.PatchOptions{})
+		_, err = kubeClient.AppsV1().StatefulSets(namespace).Patch(ctx, item.Name, result.patchType, result.patchData, metav1.PatchOptions{})
 		if err != nil {
-			return false, errors.Wrap(err, "patch statefulSet")
+			return false, fmt.Errorf("patch statefulSet: %w", err)
 		}
 
-		// wait until deployment is scaled down
-		err = wait.PollUntilContextTimeout(ctx, time.Second, time.Minute*3, true, func(ctx context.Context) (done bool, err error) {
-			obj, err := kubeClient.AppsV1().StatefulSets(namespace).Get(ctx, item.Name, metav1.GetOptions{})
-			if err != nil {
-				return false, err
-			}
+		if result.alreadyScaledDown {
+			log.Infof("StatefulSet %s/%s was already scaled down, set annotation %s on it", namespace, item.Name, constants.PausedAnnotation(isRestore))
+		} else {
+			err = wait.PollUntilContextTimeout(ctx, time.Second, time.Minute*3, true, func(ctx context.Context) (done bool, err error) {
+				obj, err := kubeClient.AppsV1().StatefulSets(namespace).Get(ctx, item.Name, metav1.GetOptions{})
+				if err != nil {
+					return false, err
+				}
 
-			return obj.Status.Replicas == 0, nil
-		})
-		if err != nil {
-			return false, errors.Wrap(err, "wait for statefulSet scaled down")
+				return obj.Status.Replicas == 0, nil
+			})
+			if err != nil {
+				return false, fmt.Errorf("wait for statefulSet scaled down: %w", err)
+			}
 		}
 	}
 
 	return true, nil
 }
 
+type scaleDownResult struct {
+	alreadyScaledDown bool
+	patchData         []byte
+	patchType         types.PatchType
+}
+
+// prepareScaleDown computes the pause annotations and patch data for a
+// StatefulSet or Deployment that is about to be scaled down.
+func prepareScaleDown(ctx context.Context, kubeClient kubernetes.Interface, object client.Object, isRestore bool) (*scaleDownResult, error) {
+	replicas := getReplicas(object)
+	alreadyScaledDown := replicas != nil && *replicas == 0
+
+	original := object.DeepCopyObject().(client.Object)
+
+	annotations := object.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	replicaCount := 1
+	if alreadyScaledDown {
+		// The workload was already scaled to 0 before we're pausing it.
+		// Read the configured replica count from the vCluster config so
+		// that resume restores the correct HA replica count.
+		replicaCount = getConfiguredReplicas(ctx, kubeClient, object.GetNamespace(), object.GetLabels()["release"])
+	} else if replicas != nil {
+		replicaCount = int(*replicas)
+	}
+
+	annotations[constants.PausedAnnotation(isRestore)] = "true"
+	annotations[constants.PausedReplicasAnnotation] = strconv.Itoa(replicaCount)
+	annotations[constants.PausedDateAnnotation] = time.Now().Format("2006-01-02T15:04:05.000Z")
+	object.SetAnnotations(annotations)
+
+	zero := int32(0)
+	setReplicas(object, &zero)
+
+	patch := client.MergeFrom(original)
+	data, err := patch.Data(object)
+	if err != nil {
+		return nil, fmt.Errorf("create patch: %w", err)
+	}
+
+	return &scaleDownResult{
+		alreadyScaledDown: alreadyScaledDown,
+		patchData:         data,
+		patchType:         patch.Type(),
+	}, nil
+}
+
+func getReplicas(obj client.Object) *int32 {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		return o.Spec.Replicas
+	case *appsv1.StatefulSet:
+		return o.Spec.Replicas
+	}
+	return nil
+}
+
+func setReplicas(obj client.Object, r *int32) {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		o.Spec.Replicas = r
+	case *appsv1.StatefulSet:
+		o.Spec.Replicas = r
+	}
+}
+
 // ResumeVCluster resumes a paused vcluster
-func ResumeVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, namespace string, log log.BaseLogger) error {
+func ResumeVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name, namespace string, isRestore bool, log log.BaseLogger) error {
 	// scale up vcluster itself
 	labelSelector := "app=vcluster,release=" + name
-	found, err := scaleUpStatefulSet(ctx, kubeClient, labelSelector, namespace, log)
+	found, err := scaleUpStatefulSet(ctx, kubeClient, labelSelector, namespace, isRestore, log)
 	if err != nil {
 		return err
 	} else if !found {
-		found, err = scaleUpDeployment(ctx, kubeClient, labelSelector, namespace, log)
+		found, err = scaleUpDeployment(ctx, kubeClient, labelSelector, namespace, isRestore, log)
 		if err != nil {
 			return err
 		} else if !found {
@@ -251,19 +290,19 @@ func ResumeVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name,
 		}
 
 		// scale up kube api server
-		_, err = scaleUpDeployment(ctx, kubeClient, "app=vcluster-api,release="+name, namespace, log)
+		_, err = scaleUpDeployment(ctx, kubeClient, "app=vcluster-api,release="+name, namespace, isRestore, log)
 		if err != nil {
 			return err
 		}
 
 		// scale up kube controller
-		_, err = scaleUpDeployment(ctx, kubeClient, "app=vcluster-controller,release="+name, namespace, log)
+		_, err = scaleUpDeployment(ctx, kubeClient, "app=vcluster-controller,release="+name, namespace, isRestore, log)
 		if err != nil {
 			return err
 		}
 
 		// scale up etcd
-		_, err = scaleUpStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, log)
+		_, err = scaleUpStatefulSet(ctx, kubeClient, "app=vcluster-etcd,release="+name, namespace, isRestore, log)
 		if err != nil {
 			return err
 		}
@@ -272,7 +311,7 @@ func ResumeVCluster(ctx context.Context, kubeClient *kubernetes.Clientset, name,
 	return nil
 }
 
-func scaleUpDeployment(ctx context.Context, kubeClient kubernetes.Interface, labelSelector string, namespace string, log log.BaseLogger) (bool, error) {
+func scaleUpDeployment(ctx context.Context, kubeClient kubernetes.Interface, labelSelector string, namespace string, isRestore bool, log log.BaseLogger) (bool, error) {
 	list, err := kubeClient.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return false, err
@@ -297,7 +336,7 @@ func scaleUpDeployment(ctx context.Context, kubeClient kubernetes.Interface, lab
 		}
 
 		replicas32 := int32(replicas)
-		delete(item.Annotations, constants.PausedAnnotation)
+		delete(item.Annotations, constants.PausedAnnotation(isRestore))
 		delete(item.Annotations, constants.PausedReplicasAnnotation)
 		delete(item.Annotations, constants.PausedDateAnnotation)
 		item.Spec.Replicas = &replicas32
@@ -318,7 +357,7 @@ func scaleUpDeployment(ctx context.Context, kubeClient kubernetes.Interface, lab
 	return true, nil
 }
 
-func scaleUpStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, labelSelector string, namespace string, log log.BaseLogger) (bool, error) {
+func scaleUpStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, labelSelector string, namespace string, isRestore bool, log log.BaseLogger) (bool, error) {
 	list, err := kubeClient.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return false, err
@@ -343,7 +382,7 @@ func scaleUpStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, la
 		}
 
 		replicas32 := int32(replicas)
-		delete(item.Annotations, constants.PausedAnnotation)
+		delete(item.Annotations, constants.PausedAnnotation(isRestore))
 		delete(item.Annotations, constants.PausedReplicasAnnotation)
 		delete(item.Annotations, constants.PausedDateAnnotation)
 		item.Spec.Replicas = &replicas32
@@ -364,6 +403,27 @@ func scaleUpStatefulSet(ctx context.Context, kubeClient kubernetes.Interface, la
 	return true, nil
 }
 
+// getConfiguredReplicas reads the configured HA replica count from the vCluster
+// config secret. Returns 1 if the secret cannot be read or the value is not set.
+func getConfiguredReplicas(ctx context.Context, kubeClient kubernetes.Interface, namespace, name string) int {
+	secret, err := kubeClient.CoreV1().Secrets(namespace).Get(ctx, "vc-config-"+name, metav1.GetOptions{})
+	if err != nil {
+		return 1
+	}
+	configBytes, ok := secret.Data["config.yaml"]
+	if !ok || len(configBytes) == 0 {
+		return 1
+	}
+	vClusterConfig, err := vclusterconfig.ParseConfigBytes(configBytes, name, nil)
+	if err != nil {
+		return 1
+	}
+	if vClusterConfig.ControlPlane.StatefulSet.HighAvailability.Replicas > 0 {
+		return int(vClusterConfig.ControlPlane.StatefulSet.HighAvailability.Replicas)
+	}
+	return 1
+}
+
 func IsPaused(annotated kube.Annotated) bool {
-	return annotated != nil && annotated.GetAnnotations()[constants.PausedAnnotation] == "true"
+	return annotated != nil && (annotated.GetAnnotations()[constants.PausedAnnotation(true)] == "true" || annotated.GetAnnotations()[constants.PausedAnnotation(false)] == "true")
 }

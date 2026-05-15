@@ -17,6 +17,7 @@ limitations under the License.
 package openapiv3
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -46,7 +47,7 @@ const (
 // AggregationController periodically checks the list of group-versions handled by each APIService and updates the discovery page periodically
 type AggregationController struct {
 	openAPIAggregationManager aggregator.SpecProxier
-	queue                     workqueue.RateLimitingInterface
+	queue                     workqueue.TypedRateLimitingInterface[string]
 
 	// To allow injection for testing.
 	syncHandler func(key string) (syncAction, error)
@@ -56,9 +57,9 @@ type AggregationController struct {
 func NewAggregationController(openAPIAggregationManager aggregator.SpecProxier) *AggregationController {
 	c := &AggregationController{
 		openAPIAggregationManager: openAPIAggregationManager,
-		queue: workqueue.NewNamedRateLimitingQueue(
-			workqueue.NewItemExponentialFailureRateLimiter(successfulUpdateDelay, failedUpdateMaxExpDelay),
-			"open_api_v3_aggregation_controller",
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](successfulUpdateDelay, failedUpdateMaxExpDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "open_api_v3_aggregation_controller"},
 		),
 	}
 
@@ -72,41 +73,50 @@ func NewAggregationController(openAPIAggregationManager aggregator.SpecProxier) 
 	return c
 }
 
-// Run starts OpenAPI AggregationController
+// Run is a legacy wrapper that starts the controller.
+//
+//logcheck:context // RunWithContext should be used instead of Run in code which supports contextual logging.
 func (c *AggregationController) Run(stopCh <-chan struct{}) {
-	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
-
-	klog.Info("Starting OpenAPI V3 AggregationController")
-	defer klog.Info("Shutting down OpenAPI V3 AggregationController")
-
-	go wait.Until(c.runWorker, time.Second, stopCh)
-
-	<-stopCh
+	c.RunWithContext(wait.ContextForChannel(stopCh))
 }
 
-func (c *AggregationController) runWorker() {
-	for c.processNextWorkItem() {
+// RunWithContext starts OpenAPI V3 AggregationController and blocks until the context is cancelled.
+func (c *AggregationController) RunWithContext(ctx context.Context) {
+	defer utilruntime.HandleCrashWithContext(ctx)
+	defer c.queue.ShutDown()
+
+	logger := klog.FromContext(ctx)
+	logger.Info("Starting OpenAPI V3 AggregationController")
+	defer logger.Info("Shutting down OpenAPI V3 AggregationController")
+
+	go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+
+	<-ctx.Done()
+}
+
+func (c *AggregationController) runWorker(ctx context.Context) {
+	logger := klog.FromContext(ctx)
+	for c.processNextWorkItem(logger) {
 	}
 }
 
 // processNextWorkItem deals with one key off the queue.  It returns false when it's time to quit.
-func (c *AggregationController) processNextWorkItem() bool {
+func (c *AggregationController) processNextWorkItem(logger klog.Logger) bool {
 	key, quit := c.queue.Get()
 	defer c.queue.Done(key)
 	if quit {
 		return false
 	}
 
-	if aggregator.IsLocalAPIService(key.(string)) {
+	if aggregator.IsLocalAPIService(key) {
 		// for local delegation targets that are aggregated once per second, log at
 		// higher level to avoid flooding the log
-		klog.V(6).Infof("OpenAPI AggregationController: Processing item %s", key)
+		logger.V(6).Info("OpenAPI AggregationController: Processing item", "key", key)
 	} else {
-		klog.V(4).Infof("OpenAPI AggregationController: Processing item %s", key)
+		logger.V(4).Info("OpenAPI AggregationController: Processing item", "key", key)
 	}
 
-	action, err := c.syncHandler(key.(string))
+	action, err := c.syncHandler(key)
 	if err == nil {
 		c.queue.Forget(key)
 	} else {
@@ -115,18 +125,18 @@ func (c *AggregationController) processNextWorkItem() bool {
 
 	switch action {
 	case syncRequeue:
-		if aggregator.IsLocalAPIService(key.(string)) {
-			klog.V(7).Infof("OpenAPI AggregationController: action for local item %s: Requeue after %s.", key, successfulUpdateDelayLocal)
+		if aggregator.IsLocalAPIService(key) {
+			logger.V(7).Info("OpenAPI AggregationController: action for local item: Requeue", "key", key, "duration", successfulUpdateDelayLocal)
 			c.queue.AddAfter(key, successfulUpdateDelayLocal)
 		} else {
-			klog.V(7).Infof("OpenAPI AggregationController: action for item %s: Requeue.", key)
+			logger.V(7).Info("OpenAPI AggregationController: action for item: Requeue", "key", key)
 			c.queue.AddAfter(key, successfulUpdateDelay)
 		}
 	case syncRequeueRateLimited:
-		klog.Infof("OpenAPI AggregationController: action for item %s: Rate Limited Requeue.", key)
+		logger.Info("OpenAPI AggregationController: action for item: Rate Limited Requeue", "key", key)
 		c.queue.AddRateLimited(key)
 	case syncNothing:
-		klog.Infof("OpenAPI AggregationController: action for item %s: Nothing (removed from the queue).", key)
+		logger.Info("OpenAPI AggregationController: action for item: Nothing (removed from the queue)", "key", key)
 	}
 
 	return true

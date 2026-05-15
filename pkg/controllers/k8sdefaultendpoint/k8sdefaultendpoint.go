@@ -27,8 +27,9 @@ import (
 )
 
 type provider interface {
-	createClientObject() client.Object
-	createOrPatch(ctx context.Context, virtualClient client.Client, vEndpoints *corev1.Endpoints) error
+	CreateClientObject() client.Object
+	//nolint:staticcheck // SA1019: corev1.Endpoints is deprecated, but still required for compatibility
+	CreateOrPatch(ctx context.Context, virtualClient client.Client, vEndpoints *corev1.Endpoints) error
 }
 
 type EndpointController struct {
@@ -49,9 +50,9 @@ func NewEndpointController(ctx *synccontext.ControllerContext, provider provider
 		VirtualClient:       ctx.VirtualManager.GetClient(),
 		VirtualManagerCache: ctx.VirtualManager.GetCache(),
 
-		ServiceName:      ctx.Config.WorkloadService,
-		ServiceNamespace: ctx.Config.WorkloadNamespace,
-		ServiceClient:    ctx.WorkloadNamespaceClient,
+		ServiceName:      ctx.Config.Name,
+		ServiceNamespace: ctx.Config.HostNamespace,
+		ServiceClient:    ctx.HostNamespaceClient,
 
 		Log:      loghelper.New("kubernetes-default-endpoint-controller"),
 		provider: provider,
@@ -77,6 +78,8 @@ func (e *EndpointController) Reconcile(ctx context.Context, _ ctrl.Request) (ctr
 }
 
 // SetupWithManager adds the controller to the manager
+//
+//nolint:staticcheck // SA1019: corev1.Endpoints is deprecated, but still required for compatibility
 func (e *EndpointController) SetupWithManager(mgr ctrl.Manager) error {
 	// creating a predicate to receive reconcile requests for kubernetes endpoint only
 	pPredicates := predicate.NewTypedPredicateFuncs(func(object client.Object) bool {
@@ -98,10 +101,11 @@ func (e *EndpointController) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		For(&corev1.Endpoints{}, builder.WithPredicates(pPredicates)).
 		WatchesRawSource(source.Kind[client.Object](e.VirtualManagerCache, &corev1.Endpoints{}, &handler.TypedEnqueueRequestForObject[client.Object]{}, vPredicates)).
-		WatchesRawSource(source.Kind(e.VirtualManagerCache, e.provider.createClientObject(), &handler.EnqueueRequestForObject{}, vPredicates)).
+		WatchesRawSource(source.Kind(e.VirtualManagerCache, e.provider.CreateClientObject(), &handler.EnqueueRequestForObject{}, vPredicates)).
 		Complete(e)
 }
 
+//nolint:staticcheck // SA1019: corev1.Endpoints is deprecated, but still required for compatibility
 func (e *EndpointController) syncKubernetesServiceEndpoints(ctx context.Context) error {
 	// get physical service endpoints
 	pEndpoints := &corev1.Endpoints{}
@@ -171,7 +175,7 @@ func (e *EndpointController) syncKubernetesServiceEndpoints(ctx context.Context)
 	}
 
 	if result == controllerutil.OperationResultCreated || result == controllerutil.OperationResultUpdated {
-		return e.provider.createOrPatch(ctx, e.VirtualClient, vEndpoints)
+		return e.provider.CreateOrPatch(ctx, e.VirtualClient, vEndpoints)
 	}
 
 	return nil

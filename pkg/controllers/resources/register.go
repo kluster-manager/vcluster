@@ -8,6 +8,7 @@ import (
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/csinodes"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/csistoragecapacities"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/endpoints"
+	"github.com/loft-sh/vcluster/pkg/controllers/resources/endpointslices"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/events"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/ingressclasses"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/ingresses"
@@ -24,9 +25,9 @@ import (
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/serviceaccounts"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/services"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/storageclasses"
-	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshots/volumesnapshotclasses"
-	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshots/volumesnapshotcontents"
-	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshots/volumesnapshots"
+	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshotclasses"
+	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshotcontents"
+	"github.com/loft-sh/vcluster/pkg/controllers/resources/volumesnapshots"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
 	"github.com/loft-sh/vcluster/pkg/util/loghelper"
@@ -44,8 +45,11 @@ func getSyncers(ctx *synccontext.RegisterContext) []BuildController {
 	return append([]BuildController{
 		isEnabled(ctx.Config.Sync.ToHost.Services.Enabled, services.New),
 		isEnabled(ctx.Config.Sync.ToHost.ConfigMaps.Enabled, configmaps.New),
+		isEnabled(ctx.Config.Sync.FromHost.ConfigMaps.Enabled, configmaps.NewFromHost),
+		isEnabled(ctx.Config.Sync.FromHost.Secrets.Enabled, secrets.NewFromHost),
 		isEnabled(ctx.Config.Sync.ToHost.Secrets.Enabled, secrets.New),
 		isEnabled(ctx.Config.Sync.ToHost.Endpoints.Enabled, endpoints.New),
+		isEnabled(ctx.Config.Sync.ToHost.EndpointSlices.Enabled, endpointslices.New),
 		isEnabled(ctx.Config.Sync.ToHost.Pods.Enabled, pods.New),
 		isEnabled(ctx.Config.Sync.FromHost.Events.Enabled, events.New),
 		isEnabled(ctx.Config.Sync.ToHost.PersistentVolumeClaims.Enabled, persistentvolumeclaims.New),
@@ -57,14 +61,14 @@ func getSyncers(ctx *synccontext.RegisterContext) []BuildController {
 		isEnabled(ctx.Config.Sync.ToHost.PriorityClasses.Enabled || ctx.Config.Sync.FromHost.PriorityClasses.Enabled, priorityclasses.New),
 		isEnabled(ctx.Config.Sync.ToHost.PodDisruptionBudgets.Enabled, poddisruptionbudgets.New),
 		isEnabled(ctx.Config.Sync.ToHost.NetworkPolicies.Enabled, networkpolicies.New),
-		isEnabled(ctx.Config.Sync.ToHost.VolumeSnapshots.Enabled, volumesnapshotclasses.New),
 		isEnabled(ctx.Config.Sync.ToHost.VolumeSnapshots.Enabled, volumesnapshots.New),
-		isEnabled(ctx.Config.Sync.ToHost.VolumeSnapshots.Enabled, volumesnapshotcontents.New),
+		isEnabled(ctx.Config.Sync.ToHost.VolumeSnapshotContents.Enabled, volumesnapshotcontents.New),
 		isEnabled(ctx.Config.Sync.ToHost.ServiceAccounts.Enabled, serviceaccounts.New),
 		isEnabled(ctx.Config.Sync.FromHost.CSINodes.Enabled == "true", csinodes.New),
 		isEnabled(ctx.Config.Sync.FromHost.CSIDrivers.Enabled == "true", csidrivers.New),
 		isEnabled(ctx.Config.Sync.FromHost.CSIStorageCapacities.Enabled == "true", csistoragecapacities.New),
-		isEnabled(ctx.Config.Experimental.MultiNamespaceMode.Enabled, namespaces.New),
+		isEnabled(ctx.Config.Sync.FromHost.VolumeSnapshotClasses.Enabled, volumesnapshotclasses.New),
+		isEnabled(ctx.Config.Sync.ToHost.Namespaces.Enabled, namespaces.New),
 		persistentvolumes.New,
 		nodes.New,
 	}, ExtraControllers...)

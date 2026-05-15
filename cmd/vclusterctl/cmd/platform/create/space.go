@@ -193,7 +193,7 @@ func (cmd *NamespaceCmd) createSpace(ctx context.Context, platformClient platfor
 			return true, nil
 		})
 		if waitErr != nil {
-			return errors.Wrap(err, "get namespace instance")
+			return errors.Wrap(waitErr, "get namespace instance")
 		}
 
 		spaceInstance = nil
@@ -308,7 +308,7 @@ func (cmd *NamespaceCmd) createSpace(ctx context.Context, platformClient platfor
 	}
 
 	// wait until space is ready
-	spaceInstance, err = platform.WaitForSpaceInstance(ctx, managementClient, spaceInstance.Namespace, spaceInstance.Name, !cmd.SkipWait, cmd.Log)
+	spaceInstance, err = platform.WaitForSpaceInstance(ctx, managementClient, spaceInstance.Namespace, spaceInstance.Name, !cmd.SkipWait, false, cmd.Log)
 	if err != nil {
 		return err
 	}
@@ -317,7 +317,7 @@ func (cmd *NamespaceCmd) createSpace(ctx context.Context, platformClient platfor
 	// should we create a kube context for the space
 	if cmd.CreateContext {
 		// create kube context options
-		contextOptions, err := platform.CreateSpaceInstanceOptions(ctx, platformClient, cmd.Config, cmd.Project, spaceInstance, cmd.SwitchContext)
+		contextOptions, err := platform.CreateSpaceInstanceOptions(ctx, platformClient, cmd.Config, cmd.Project, spaceInstance, cmd.SwitchContext, cmd.DisableDirectClusterEndpoint)
 		if err != nil {
 			return err
 		}

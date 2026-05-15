@@ -53,6 +53,7 @@ type Client interface {
 	Exists(name, namespace string) (bool, error)
 	Rollback(ctx context.Context, name, namespace string) error
 	Status(ctx context.Context, name, namespace string) ([]byte, error)
+	GetValues(ctx context.Context, name, namespace string, all bool) ([]byte, error)
 }
 
 type client struct {
@@ -242,7 +243,7 @@ func (c *client) logout(ctx context.Context, options UpgradeOptions) {
 }
 
 func (c *client) execute(ctx context.Context, args []string, operation string, workdir string) error {
-	c.log.Info("execute command: helm " + strings.Join(args, " "))
+	c.log.Debug("execute command: helm " + strings.Join(args, " "))
 	cmd := exec.CommandContext(ctx, c.helmPath, args...)
 
 	if workdir != "" {
@@ -311,6 +312,34 @@ func (c *client) Status(ctx context.Context, name, namespace string) ([]byte, er
 
 	args := []string{"status", name, "--namespace", namespace, "--kubeconfig", kubeConfig}
 	return exec.CommandContext(ctx, c.helmPath, args...).CombinedOutput()
+}
+
+func (c *client) GetValues(ctx context.Context, name, namespace string, all bool) ([]byte, error) {
+	kubeConfig, err := WriteKubeConfig(c.config)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(kubeConfig)
+
+	args := []string{"get", "values", name, "--namespace", namespace, "--kubeconfig", kubeConfig}
+	if all {
+		args = append(args, "--all")
+	}
+
+	c.log.Debug("Get helm chart values with helm " + strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, c.helmPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf(errorTimeout, string(output), "get values")
+		}
+		if strings.Contains(string(output), "release: not found") {
+			return nil, fmt.Errorf("release '%s' not found in namespace '%s'", name, namespace)
+		}
+		return nil, fmt.Errorf("error executing helm get values for release '%s': %s", name, string(output))
+	}
+
+	return output, nil
 }
 
 // WriteKubeConfig writes the kubeconfig to a file and returns the filename

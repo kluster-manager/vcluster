@@ -6,6 +6,7 @@ import (
 
 	"github.com/loft-sh/vcluster/pkg/mappings"
 	"github.com/loft-sh/vcluster/pkg/patcher"
+	"github.com/loft-sh/vcluster/pkg/pro"
 	"github.com/loft-sh/vcluster/pkg/syncer"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/loft-sh/vcluster/pkg/constants"
 	"github.com/loft-sh/vcluster/pkg/controllers/resources/nodes/nodeservice"
+	"github.com/loft-sh/vcluster/pkg/util/osutil"
 	"github.com/loft-sh/vcluster/pkg/util/toleration"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	corev1 "k8s.io/api/core/v1"
@@ -59,7 +61,9 @@ func NewSyncer(ctx *synccontext.RegisterContext, nodeServiceProvider nodeservice
 	return &nodeSyncer{
 		Mapper: nodesMapper,
 
-		enableScheduler: ctx.Config.ControlPlane.Advanced.VirtualScheduler.Enabled,
+		// If either virtual scheduler or hybrid scheduling is enabled, it means that pods in the virtual cluster can be
+		// scheduled by a scheduler from the virtual cluster.
+		enableScheduler: ctx.Config.SchedulingInVirtualClusterEnabled(),
 
 		enforceNodeSelector:  true,
 		nodeSelector:         nodeSelector,
@@ -68,7 +72,7 @@ func NewSyncer(ctx *synccontext.RegisterContext, nodeServiceProvider nodeservice
 		fakeKubeletIPs:       ctx.Config.Networking.Advanced.ProxyKubelets.ByIP,
 		fakeKubeletHostnames: ctx.Config.Networking.Advanced.ProxyKubelets.ByHostname,
 
-		physicalClient:      ctx.PhysicalManager.GetClient(),
+		hostClient:          ctx.HostManager.GetClient(),
 		virtualClient:       ctx.VirtualManager.GetClient(),
 		nodeServiceProvider: nodeServiceProvider,
 		enforcedTolerations: tolerations,
@@ -79,7 +83,7 @@ type nodeSyncer struct {
 	synccontext.Mapper
 
 	nodeSelector         labels.Selector
-	physicalClient       client.Client
+	hostClient           client.Client
 	virtualClient        client.Client
 	unmanagedPodCache    client.Reader
 	nodeServiceProvider  nodeservice.Provider
@@ -103,7 +107,7 @@ func (s *nodeSyncer) Name() string {
 var _ syncertypes.Syncer = &nodeSyncer{}
 
 func (s *nodeSyncer) Syncer() syncertypes.Sync[client.Object] {
-	return syncer.ToGenericSyncer[*corev1.Node](s)
+	return syncer.ToGenericSyncer(s)
 }
 
 var _ syncertypes.ControllerModifier = &nodeSyncer{}
@@ -115,9 +119,9 @@ func (s *nodeSyncer) ModifyController(ctx *synccontext.RegisterContext, bld *bui
 			return bld, fmt.Errorf("constructing label selector for non-vcluster pods: %w", err)
 		}
 		// create a pod cache containing pods from all namespaces for calculating the correct node resources
-		podCache, err := cache.New(ctx.PhysicalManager.GetConfig(), cache.Options{
-			Scheme: ctx.PhysicalManager.GetScheme(),
-			Mapper: ctx.PhysicalManager.GetRESTMapper(),
+		podCache, err := cache.New(ctx.HostManager.GetConfig(), cache.Options{
+			Scheme: ctx.HostManager.GetScheme(),
+			Mapper: ctx.HostManager.GetRESTMapper(),
 			// omits pods managed by the vcluster
 			DefaultLabelSelector: labels.NewSelector().Add(*notManagedSelector),
 		})
@@ -143,7 +147,8 @@ func (s *nodeSyncer) ModifyController(ctx *synccontext.RegisterContext, bld *bui
 		go func() {
 			err := podCache.Start(ctx)
 			if err != nil {
-				klog.Fatalf("error starting pod cache: %v", err)
+				klog.Errorf("error starting pod cache: %v", err)
+				osutil.Exit(1)
 			}
 		}()
 
@@ -154,17 +159,17 @@ func (s *nodeSyncer) ModifyController(ctx *synccontext.RegisterContext, bld *bui
 		// the syncer is configured to update virtual node's .status.allocatable fields by summing the consumption of these pods
 		bld.WatchesRawSource(
 			source.Kind(podCache, &corev1.Pod{},
-				handler.TypedFuncs[*corev1.Pod]{
-					GenericFunc: func(_ context.Context, ev event.TypedGenericEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+				handler.TypedFuncs[*corev1.Pod, ctrl.Request]{
+					GenericFunc: func(_ context.Context, ev event.TypedGenericEvent[*corev1.Pod], q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
 						enqueueNonVClusterPod(nil, ev.Object, q)
 					},
-					CreateFunc: func(_ context.Context, ev event.TypedCreateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+					CreateFunc: func(_ context.Context, ev event.TypedCreateEvent[*corev1.Pod], q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
 						enqueueNonVClusterPod(nil, ev.Object, q)
 					},
-					UpdateFunc: func(_ context.Context, ue event.TypedUpdateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+					UpdateFunc: func(_ context.Context, ue event.TypedUpdateEvent[*corev1.Pod], q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
 						enqueueNonVClusterPod(ue.ObjectOld, ue.ObjectNew, q)
 					},
-					DeleteFunc: func(_ context.Context, ev event.TypedDeleteEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+					DeleteFunc: func(_ context.Context, ev event.TypedDeleteEvent[*corev1.Pod], q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
 						enqueueNonVClusterPod(nil, ev.Object, q)
 					},
 				}),
@@ -174,20 +179,20 @@ func (s *nodeSyncer) ModifyController(ctx *synccontext.RegisterContext, bld *bui
 }
 
 // only used when scheduler is enabled
-func enqueueNonVClusterPod(old, new client.Object, q workqueue.RateLimitingInterface) {
-	pod, ok := new.(*corev1.Pod)
+func enqueueNonVClusterPod(oldObject, newObject client.Object, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+	pod, ok := newObject.(*corev1.Pod)
 	if !ok {
-		klog.Errorf("invalid type passed to pod handler: %T", new)
+		klog.Errorf("invalid type passed to pod handler: %T", newObject)
 		return
 	}
 	// skip if node name missing
 	if pod.Spec.NodeName == "" {
 		return
 	}
-	if old != nil {
-		oldPod, ok := old.(*corev1.Pod)
+	if oldObject != nil {
+		oldPod, ok := oldObject.(*corev1.Pod)
 		if !ok {
-			klog.Errorf("invalid type passed to pod handler: %T", old)
+			klog.Errorf("invalid type passed to pod handler: %T", oldObject)
 			return
 		}
 		// skip if running status not updated
@@ -204,7 +209,7 @@ func modifyController(ctx *synccontext.RegisterContext, nodeServiceProvider node
 		nodeServiceProvider.Start(ctx)
 	}()
 
-	bld = bld.WatchesRawSource(source.Kind(ctx.PhysicalManager.GetCache(), &corev1.Pod{}, handler.TypedEnqueueRequestsFromMapFunc(func(_ context.Context, pod *corev1.Pod) []reconcile.Request {
+	bld = bld.WatchesRawSource(source.Kind(ctx.HostManager.GetCache(), &corev1.Pod{}, handler.TypedEnqueueRequestsFromMapFunc(func(_ context.Context, pod *corev1.Pod) []reconcile.Request {
 		isManaged, err := mappings.IsManaged(ctx.ToSyncContext("nodes-mapper"), pod)
 		if err != nil {
 			klog.FromContext(ctx).Error(err, "is pod managed")
@@ -245,7 +250,7 @@ func (s *nodeSyncer) RegisterIndices(ctx *synccontext.RegisterContext) error {
 }
 
 func registerIndices(ctx *synccontext.RegisterContext) error {
-	err := ctx.PhysicalManager.GetFieldIndexer().IndexField(ctx, &corev1.Pod{}, constants.IndexByAssigned, func(rawObj client.Object) []string {
+	err := ctx.HostManager.GetFieldIndexer().IndexField(ctx, &corev1.Pod{}, constants.IndexByAssigned, func(rawObj client.Object) []string {
 		pod := rawObj.(*corev1.Pod)
 		isManaged, err := mappings.IsManaged(ctx.ToSyncContext("nodes-syncer"), pod)
 		if err != nil {
@@ -271,6 +276,11 @@ func registerIndices(ctx *synccontext.RegisterContext) error {
 }
 
 func (s *nodeSyncer) SyncToHost(ctx *synccontext.SyncContext, event *synccontext.SyncToHostEvent[*corev1.Node]) (ctrl.Result, error) {
+	if event.HostOld == nil {
+		if event.Virtual.GetLabels() == nil || (event.Virtual.GetLabels() != nil && event.Virtual.GetLabels()[translate.MarkerLabel] != translate.VClusterName) {
+			return ctrl.Result{}, nil
+		}
+	}
 	ctx.Log.Infof("delete virtual node %s, because it is not needed anymore", event.Virtual.Name)
 	return ctrl.Result{}, ctx.VirtualClient.Delete(ctx, event.Virtual)
 }
@@ -284,7 +294,7 @@ func (s *nodeSyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncE
 		return ctrl.Result{}, ctx.VirtualClient.Delete(ctx, event.Virtual)
 	}
 
-	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual)
+	patch, err := patcher.NewSyncerPatcher(ctx, event.Host, event.Virtual, patcher.TranslatePatches(ctx.Config.Sync.FromHost.Nodes.Patches, true))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("new syncer patcher: %w", err)
 	}
@@ -300,6 +310,15 @@ func (s *nodeSyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncE
 	}
 
 	s.translateUpdateBackwards(event.Host, event.Virtual)
+
+	// Set the marker of managed-by vcluster so that
+	// we skip deleting the nodes which are not managed
+	// by vcluster in `SyncToHost` function
+	if len(event.Virtual.Labels) == 0 {
+		event.Virtual.Labels = map[string]string{}
+	}
+	event.Virtual.Labels[translate.MarkerLabel] = translate.VClusterName
+
 	return ctrl.Result{}, nil
 }
 
@@ -312,13 +331,21 @@ func (s *nodeSyncer) SyncToVirtual(ctx *synccontext.SyncContext, event *synccont
 	}
 
 	ctx.Log.Infof("create virtual node %s, because there is a virtual pod with that node", event.Host.Name)
-	err = ctx.VirtualClient.Create(ctx, &corev1.Node{
+	virtualNode := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        event.Host.Name,
 			Labels:      event.Host.Labels,
 			Annotations: event.Host.Annotations,
 		},
-	})
+	}
+
+	// Apply pro patches
+	err = pro.ApplyPatchesVirtualObject(ctx, nil, virtualNode, event.Host, ctx.Config.Sync.FromHost.Nodes.Patches, true)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("error applying patches: %w", err)
+	}
+
+	err = ctx.VirtualClient.Create(ctx, virtualNode)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -336,13 +363,13 @@ func (s *nodeSyncer) shouldSync(ctx context.Context, pObj *corev1.Node) (bool, e
 
 		matched := s.nodeSelector.Matches(ls)
 		if !matched && !s.enforceNodeSelector {
-			return isNodeNeededByPod(ctx, s.virtualClient, s.physicalClient, pObj.Name)
+			return isNodeNeededByPod(ctx, s.virtualClient, s.hostClient, pObj.Name)
 		}
 
 		return matched, nil
 	}
 
-	return isNodeNeededByPod(ctx, s.virtualClient, s.physicalClient, pObj.Name)
+	return isNodeNeededByPod(ctx, s.virtualClient, s.hostClient, pObj.Name)
 }
 
 func isNodeNeededByPod(ctx context.Context, virtualClient client.Client, physicalClient client.Client, nodeName string) (bool, error) {

@@ -11,9 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-var (
-	deprecatedStorageClassAnnotation = "volume.beta.kubernetes.io/storage-class"
-)
+var deprecatedStorageClassAnnotation = "volume.beta.kubernetes.io/storage-class"
 
 func (s *persistentVolumeClaimSyncer) translate(ctx *synccontext.SyncContext, vPvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
 	pPVC := translate.HostMetadata(vPvc, s.VirtualToHost(ctx, types.NamespacedName{Name: vPvc.GetName(), Namespace: vPvc.GetNamespace()}, vPvc), s.excludedAnnotations...)
@@ -21,9 +19,10 @@ func (s *persistentVolumeClaimSyncer) translate(ctx *synccontext.SyncContext, vP
 
 	if vPvc.Annotations[constants.SkipTranslationAnnotation] != "true" {
 		if pPVC.Spec.DataSource != nil {
-			if pPVC.Spec.DataSource.Kind == "VolumeSnapshot" {
+			switch pPVC.Spec.DataSource.Kind {
+			case "VolumeSnapshot":
 				pPVC.Spec.DataSource.Name = mappings.VirtualToHostName(ctx, pPVC.Spec.DataSource.Name, vPvc.Namespace, mappings.VolumeSnapshots())
-			} else if pPVC.Spec.DataSource.Kind == "PersistentVolumeClaim" {
+			case "PersistentVolumeClaim":
 				pPVC.Spec.DataSource.Name = mappings.VirtualToHostName(ctx, pPVC.Spec.DataSource.Name, vPvc.Namespace, mappings.PersistentVolumeClaims())
 			}
 		}
@@ -34,9 +33,10 @@ func (s *persistentVolumeClaimSyncer) translate(ctx *synccontext.SyncContext, vP
 				namespace = *pPVC.Spec.DataSourceRef.Namespace
 			}
 
-			if pPVC.Spec.DataSourceRef.Kind == "VolumeSnapshot" {
+			switch pPVC.Spec.DataSourceRef.Kind {
+			case "VolumeSnapshot":
 				pPVC.Spec.DataSourceRef.Name = mappings.VirtualToHostName(ctx, pPVC.Spec.DataSourceRef.Name, namespace, mappings.VolumeSnapshots())
-			} else if pPVC.Spec.DataSourceRef.Kind == "PersistentVolumeClaim" {
+			case "PersistentVolumeClaim":
 				pPVC.Spec.DataSourceRef.Name = mappings.VirtualToHostName(ctx, pPVC.Spec.DataSourceRef.Name, namespace, mappings.PersistentVolumeClaims())
 			}
 		}
@@ -73,7 +73,7 @@ func (s *persistentVolumeClaimSyncer) translateSelector(ctx *synccontext.SyncCon
 			if !s.storageClassesEnabled && storageClassName != "" {
 				// Should the PVC be dynamically provisioned or not?
 				if vPvc.Spec.Selector == nil && vPvc.Spec.VolumeName == "" {
-					err := ctx.PhysicalClient.Get(ctx, types.NamespacedName{Name: storageClassName}, &storagev1.StorageClass{})
+					err := ctx.HostClient.Get(ctx, types.NamespacedName{Name: storageClassName}, &storagev1.StorageClass{})
 					if err != nil && kerrors.IsNotFound(err) {
 						translated := translate.Default.HostNameCluster(storageClassName)
 						delete(vPvc.Annotations, deprecatedStorageClassAnnotation)

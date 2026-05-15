@@ -16,7 +16,6 @@ import (
 	syncertesting "github.com/loft-sh/vcluster/pkg/syncer/testing"
 	"github.com/loft-sh/vcluster/pkg/syncer/translator"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
-	"github.com/loft-sh/vcluster/pkg/util/fifolocker"
 	"github.com/loft-sh/vcluster/pkg/util/loghelper"
 	testingutil "github.com/loft-sh/vcluster/pkg/util/testing"
 	"github.com/loft-sh/vcluster/pkg/util/translate"
@@ -60,7 +59,7 @@ func (s *mockSyncer) SyncToHost(ctx *synccontext.SyncContext, event *synccontext
 		return ctrl.Result{}, errors.New("naive translate create failed")
 	}
 
-	return CreateHostObject(ctx, event.Virtual, pObj, s.EventRecorder())
+	return patcher.CreateHostObject(ctx, event.Virtual, pObj, s.EventRecorder(), false)
 }
 
 // Sync is called to sync a virtual object with a physical object
@@ -79,14 +78,19 @@ func (s *mockSyncer) Sync(ctx *synccontext.SyncContext, event *synccontext.SyncE
 	event.Host.Labels = translate.HostLabels(event.Virtual, event.Host)
 
 	// check data
-	event.TargetObject().Data = event.SourceObject().Data
+	event.Virtual.Data, event.Host.Data = patcher.CopyBidirectional(
+		event.VirtualOld.Data,
+		event.Virtual.Data,
+		event.HostOld.Data,
+		event.Host.Data,
+	)
 
 	return ctrl.Result{}, nil
 }
 
 func (s *mockSyncer) SyncToVirtual(ctx *synccontext.SyncContext, event *synccontext.SyncToVirtualEvent[*corev1.Secret]) (_ ctrl.Result, retErr error) {
 	// virtual object is not here anymore, so we delete
-	return DeleteHostObject(ctx, event.Host, "virtual object was deleted")
+	return patcher.DeleteHostObject(ctx, event.Host, event.VirtualOld, "virtual object was deleted")
 }
 
 var _ syncertypes.Syncer = &mockSyncer{}
@@ -98,7 +102,7 @@ var (
 type fakeSource struct {
 	m sync.Mutex
 
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[ctrl.Request]
 }
 
 func (f *fakeSource) String() string {
@@ -112,7 +116,7 @@ func (f *fakeSource) Add(request reconcile.Request) {
 	f.queue.Add(request)
 }
 
-func (f *fakeSource) Start(_ context.Context, queue workqueue.RateLimitingInterface) error {
+func (f *fakeSource) Start(_ context.Context, queue workqueue.TypedRateLimitingInterface[ctrl.Request]) error {
 	f.m.Lock()
 	defer f.m.Unlock()
 
@@ -224,6 +228,8 @@ func TestController(t *testing.T) {
 		syncer, err := NewMockSyncer(fakeContext)
 		assert.NilError(t, err)
 
+		assert.Check(t, fakeContext.Config.HostConfig != nil)
+
 		syncController, err := NewSyncController(fakeContext, syncer)
 		assert.NilError(t, err)
 
@@ -252,7 +258,7 @@ func TestController(t *testing.T) {
 		// Compare states
 		if tc.ExpectedPhysicalState != nil {
 			for gvk, objs := range tc.ExpectedPhysicalState {
-				err := syncertesting.CompareObjs(ctx, t, tc.Name+" physical state", fakeContext.PhysicalManager.GetClient(), gvk, scheme.Scheme, objs, tc.Compare)
+				err := syncertesting.CompareObjs(ctx, t, tc.Name+" physical state", fakeContext.HostManager.GetClient(), gvk, scheme.Scheme, objs, tc.Compare)
 				if err != nil {
 					t.Fatalf("%s - Physical State mismatch: %v", tc.Name, err)
 				}
@@ -387,6 +393,9 @@ func TestReconcile(t *testing.T) {
 						Namespace: namespaceInVClusterA,
 						UID:       "123",
 					},
+					Data: map[string][]byte{
+						"datakey1": []byte("datavalue1"),
+					},
 				},
 			},
 
@@ -418,6 +427,9 @@ func TestReconcile(t *testing.T) {
 							Namespace: namespaceInVClusterA,
 							UID:       "123",
 						},
+						Data: map[string][]byte{
+							"datakey1": []byte("datavalue1"),
+						},
 					},
 				},
 			},
@@ -442,6 +454,9 @@ func TestReconcile(t *testing.T) {
 								translate.NamespaceLabel: namespaceInVClusterA,
 							},
 						},
+						Data: map[string][]byte{
+							"datakey1": []byte("datavalue1"),
+						},
 					},
 				},
 			},
@@ -451,9 +466,7 @@ func TestReconcile(t *testing.T) {
 			Syncer: NewMockSyncer,
 
 			EnqueueObjs: []types.NamespacedName{
-				toHostRequest(reconcile.Request{
-					NamespacedName: types.NamespacedName{Name: "abc", Namespace: testingutil.DefaultTestTargetNamespace},
-				}).NamespacedName,
+				{Name: "abc", Namespace: testingutil.DefaultTestTargetNamespace},
 			},
 
 			CreateVirtualObjects: []client.Object{
@@ -561,6 +574,8 @@ func TestReconcile(t *testing.T) {
 			vEventRecorder: &testingutil.FakeEventRecorder{},
 			physicalClient: pClient,
 
+			hostNameRequestLookup: map[ctrl.Request]ctrl.Request{},
+
 			currentNamespace:       fakeContext.CurrentNamespace,
 			currentNamespaceClient: fakeContext.CurrentNamespaceClient,
 
@@ -569,12 +584,13 @@ func TestReconcile(t *testing.T) {
 			virtualClient: vClient,
 			options:       options,
 
-			locker: fifolocker.New(),
+			objectCache: synccontext.NewBidirectionalObjectCache(syncer.Resource(), syncer),
+			config:      fakeContext.Config,
 		}
 
 		// create objects
 		for _, pObj := range tc.CreatePhysicalObjects {
-			err = fakeContext.PhysicalManager.GetClient().Create(ctx, pObj)
+			err = fakeContext.HostManager.GetClient().Create(ctx, pObj)
 			assert.NilError(t, err)
 		}
 		for _, vObj := range tc.CreateVirtualObjects {
@@ -596,7 +612,7 @@ func TestReconcile(t *testing.T) {
 		// Compare states
 		if tc.ExpectedPhysicalState != nil {
 			for gvk, objs := range tc.ExpectedPhysicalState {
-				err := syncertesting.CompareObjs(ctx, t, tc.Name+" physical state", fakeContext.PhysicalManager.GetClient(), gvk, scheme.Scheme, objs, tc.Compare)
+				err := syncertesting.CompareObjs(ctx, t, tc.Name+" physical state", fakeContext.HostManager.GetClient(), gvk, scheme.Scheme, objs, tc.Compare)
 				if err != nil {
 					t.Fatalf("%s - Physical State mismatch: %v", tc.Name, err)
 				}

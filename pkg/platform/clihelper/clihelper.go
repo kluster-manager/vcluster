@@ -59,11 +59,23 @@ const LoftRouterDomainSecret = "loft-router-domain"
 
 const DefaultPlatformNamespace = "vcluster-platform"
 
+const LegacyPlatformNamespace = "loft"
+
+const DefaultPlatformServiceName = "loft"
+
 const defaultTimeout = 10 * time.Minute
 
 const timeoutEnvVariable = "LOFT_TIMEOUT"
 
 var defaultDeploymentName = "loft"
+
+var DefaultClusterRoles = []string{
+	"loft-agent-cluster",
+	"loft-runner-cluster",
+	"loft-vcluster-cluster",
+	"loft-cluster-authenticated",
+	"loft-management-authenticated",
+}
 
 func Timeout() time.Duration {
 	if timeout := os.Getenv(timeoutEnvVariable); timeout != "" {
@@ -332,35 +344,18 @@ func GetLoftDefaultPassword(ctx context.Context, kubeClient kubernetes.Interface
 	return string(loftNamespace.UID), nil
 }
 
-type version struct {
-	Version string `json:"version"`
-}
-
-func IsLoftReachable(ctx context.Context, host string) (bool, error) {
+func IsLoftReachable(ctx context.Context, host string, insecure bool) (bool, error) {
 	// wait until loft is reachable at the given url
 	client := &http.Client{
-		Transport: utilhttp.InsecureTransport(),
+		Transport: utilhttp.Transport(insecure),
 	}
-	url := "https://" + host + "/version"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	endpoint := fmt.Sprintf("https://%s/healthz", host)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return false, fmt.Errorf("error creating request with context: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {
-		out, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return false, nil
-		}
-
-		v := &version{}
-		err = json.Unmarshal(out, v)
-		if err != nil {
-			return false, fmt.Errorf("error decoding response from %s: %w. Try running '%s --reset'", url, err, product.StartCmd())
-		} else if v.Version == "" {
-			return false, fmt.Errorf("unexpected response from %s: %s. Try running '%s --reset'", url, string(out), product.StartCmd())
-		}
-
 		return true, nil
 	}
 
@@ -444,7 +439,14 @@ func IsLoftAlreadyInstalled(ctx context.Context, kubeClient kubernetes.Interface
 		}
 	}
 
-	_, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, defaultDeploymentName, metav1.GetOptions{})
+	_, err := kubeClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if kerrors.IsNotFound(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("failed to get namespace %q", namespace)
+	}
+
+	_, err = kubeClient.AppsV1().Deployments(namespace).Get(ctx, defaultDeploymentName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			return false, nil
@@ -455,6 +457,8 @@ func IsLoftAlreadyInstalled(ctx context.Context, kubeClient kubernetes.Interface
 
 	return true, nil
 }
+
+var ErrPlatformNamespaceNotFound = errors.New("vCluster Platform installation namespace not found")
 
 func VClusterPlatformInstallationNamespace(ctx context.Context) (string, error) {
 	kubeClientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
@@ -486,7 +490,7 @@ func VClusterPlatformInstallationNamespace(ctx context.Context) (string, error) 
 		}
 	}
 
-	return "", fmt.Errorf("failed to find the namespace loft is installed in")
+	return "", ErrPlatformNamespaceNotFound
 }
 
 func UninstallLoft(ctx context.Context, kubeClient kubernetes.Interface, restConfig *rest.Config, kubeContext, namespace string, log log.Logger) error {
@@ -620,8 +624,8 @@ func EnsureIngressController(ctx context.Context, kubeClient kubernetes.Interfac
 	)
 
 	answer, err := log.Question(&survey.QuestionOptions{
-		Question:     "Ingress controller required. Should the nginx-ingress controller be installed?",
-		DefaultValue: YesOption,
+		Question:     "[DEPRECATED]: Ingress controller required. Should the nginx-ingress controller be installed?",
+		DefaultValue: NoOption,
 		Options: []string{
 			YesOption,
 			NoOption,
@@ -700,14 +704,20 @@ func EnsureIngressController(ctx context.Context, kubeClient kubernetes.Interfac
 	return nil
 }
 
-func UpgradeLoft(chartName, chartRepo, kubeContext, namespace string, extraArgs []string, log log.Logger) error {
+func UpgradeLoft(ctx context.Context, kubeClient kubernetes.Interface, chartName, chartRepo, kubeContext, namespace string, extraArgs []string, log log.Logger) error {
+	releaseName := defaultReleaseName
+	deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, defaultDeploymentName, metav1.GetOptions{})
+	if err != nil && !kerrors.IsNotFound(err) {
+		return err
+	} else if deploy != nil && deploy.Labels != nil && deploy.Labels["release"] != "" {
+		releaseName = deploy.Labels["release"]
+	}
 	// now we install loft
 	args := []string{
 		"upgrade",
-		defaultReleaseName,
+		releaseName,
 		chartName,
 		"--install",
-		"--reuse-values",
 		"--create-namespace",
 		"--repository-config=''",
 		"--kube-context",
@@ -721,7 +731,8 @@ func UpgradeLoft(chartName, chartRepo, kubeContext, namespace string, extraArgs 
 	args = append(args, extraArgs...)
 
 	log.WriteString(logrus.InfoLevel, "\n")
-	log.Infof("Executing command: helm %s\n", strings.Join(args, " "))
+	log.Debugf("Executing command: helm %s\n", strings.Join(args, " "))
+	log.Infof("Starting vCluster platform...")
 	log.Info("Waiting for helm command, this can take up to several minutes...")
 	helmCmd := exec.Command("helm", args...)
 	if chartRepo != "" {
@@ -741,10 +752,18 @@ func UpgradeLoft(chartName, chartRepo, kubeContext, namespace string, extraArgs 
 	return nil
 }
 
-func GetLoftManifests(chartName, chartRepo, kubeContext, namespace string, extraArgs []string, _ log.Logger) (string, error) {
+func GetLoftManifests(ctx context.Context, kubeClient kubernetes.Interface, chartName, chartRepo, kubeContext, namespace string, extraArgs []string, _ log.Logger) (string, error) {
+	releaseName := defaultReleaseName
+	deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, defaultDeploymentName, metav1.GetOptions{})
+	if err != nil && !kerrors.IsNotFound(err) {
+		return "", err
+	} else if deploy != nil && deploy.Labels != nil && deploy.Labels["release"] != "" {
+		releaseName = deploy.Labels["release"]
+	}
+
 	args := []string{
 		"template",
-		defaultReleaseName,
+		releaseName,
 		chartName,
 		"--repository-config=''",
 		"--kube-context",

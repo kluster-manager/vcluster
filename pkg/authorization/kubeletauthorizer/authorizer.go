@@ -2,7 +2,9 @@ package kubeletauthorizer
 
 import (
 	"context"
+	"strings"
 
+	"github.com/loft-sh/vcluster/pkg/authorization/delegatingauthorizer"
 	"github.com/loft-sh/vcluster/pkg/server/filters"
 	"github.com/loft-sh/vcluster/pkg/util/clienthelper"
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -20,11 +22,15 @@ type PathVerb struct {
 func New(uncachedVirtualClient client.Client) authorizer.Authorizer {
 	return &kubeletAuthorizer{
 		uncachedVirtualClient: uncachedVirtualClient,
+
+		cache: delegatingauthorizer.NewCache(),
 	}
 }
 
 type kubeletAuthorizer struct {
 	uncachedVirtualClient client.Client
+
+	cache *delegatingauthorizer.Cache
 }
 
 func (l *kubeletAuthorizer) Authorize(ctx context.Context, a authorizer.Attributes) (authorized authorizer.Decision, reason string, err error) { // get node name
@@ -33,6 +39,12 @@ func (l *kubeletAuthorizer) Authorize(ctx context.Context, a authorizer.Attribut
 		return authorizer.DecisionNoOpinion, "", nil
 	} else if a.IsResourceRequest() {
 		return authorizer.DecisionDeny, "forbidden", nil
+	}
+
+	// check if in cache
+	authorized, reason, exists := l.cache.Get(a)
+	if exists {
+		return authorized, reason, nil
 	}
 
 	// check if request is allowed in the target cluster
@@ -65,6 +77,17 @@ func (l *kubeletAuthorizer) Authorize(ctx context.Context, a authorizer.Attribut
 			Subresource: "metrics",
 			Name:        nodeName,
 		}
+	} else if filters.IsKubeletPods(a.GetPath()) || strings.HasPrefix(a.GetPath(), "/containerLogs/") {
+		// /pods and /containerLogs/... are accessed via the kubelet proxy; map to nodes/proxy
+		// so the existing ClusterRole grant (nodes/proxy) covers them
+		accessReview.Spec.ResourceAttributes = &authorizationv1.ResourceAttributes{
+			Verb:        "get",
+			Group:       corev1.SchemeGroupVersion.Group,
+			Version:     corev1.SchemeGroupVersion.Version,
+			Resource:    "nodes",
+			Subresource: "proxy",
+			Name:        nodeName,
+		}
 	} else {
 		accessReview.Spec.NonResourceAttributes = &authorizationv1.NonResourceAttributes{
 			Path: a.GetPath(),
@@ -76,6 +99,7 @@ func (l *kubeletAuthorizer) Authorize(ctx context.Context, a authorizer.Attribut
 	if err != nil {
 		return authorizer.DecisionDeny, "", err
 	} else if accessReview.Status.Allowed && !accessReview.Status.Denied {
+		l.cache.Set(a, authorizer.DecisionAllow, "")
 		return authorizer.DecisionAllow, "", nil
 	}
 

@@ -17,6 +17,7 @@ limitations under the License.
 package openapi
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -47,7 +48,7 @@ const (
 // them if necessary.
 type AggregationController struct {
 	openAPIAggregationManager aggregator.SpecAggregator
-	queue                     workqueue.RateLimitingInterface
+	queue                     workqueue.TypedRateLimitingInterface[string]
 	downloader                *aggregator.Downloader
 
 	// To allow injection for testing.
@@ -58,9 +59,9 @@ type AggregationController struct {
 func NewAggregationController(downloader *aggregator.Downloader, openAPIAggregationManager aggregator.SpecAggregator) *AggregationController {
 	c := &AggregationController{
 		openAPIAggregationManager: openAPIAggregationManager,
-		queue: workqueue.NewNamedRateLimitingQueue(
-			workqueue.NewItemExponentialFailureRateLimiter(successfulUpdateDelay, failedUpdateMaxExpDelay),
-			"open_api_aggregation_controller",
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](successfulUpdateDelay, failedUpdateMaxExpDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "open_api_aggregation_controller"},
 		),
 		downloader: downloader,
 	}
@@ -70,34 +71,44 @@ func NewAggregationController(downloader *aggregator.Downloader, openAPIAggregat
 	return c
 }
 
-// Run starts OpenAPI AggregationController
+// Run is a legacy wrapper that starts the controller.
+//
+//logcheck:context // RunWithContext should be used instead of Run in code which supports contextual logging.
 func (c *AggregationController) Run(stopCh <-chan struct{}) {
-	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
-
-	klog.Info("Starting OpenAPI AggregationController")
-	defer klog.Info("Shutting down OpenAPI AggregationController")
-
-	go wait.Until(c.runWorker, time.Second, stopCh)
-
-	<-stopCh
+	c.RunWithContext(wait.ContextForChannel(stopCh))
 }
 
-func (c *AggregationController) runWorker() {
-	for c.processNextWorkItem() {
+// RunWithContext starts OpenAPI AggregationController and blocks until the context is cancelled.
+func (c *AggregationController) RunWithContext(ctx context.Context) {
+	defer utilruntime.HandleCrashWithContext(ctx)
+	defer c.queue.ShutDown()
+
+	logger := klog.FromContext(ctx)
+	logger.Info("Starting OpenAPI AggregationController")
+	defer logger.Info("Shutting down OpenAPI AggregationController")
+
+	go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+
+	<-ctx.Done()
+}
+
+func (c *AggregationController) runWorker(ctx context.Context) {
+	logger := klog.FromContext(ctx)
+	for c.processNextWorkItem(logger) {
 	}
 }
 
 // processNextWorkItem deals with one key off the queue.  It returns false when it's time to quit.
-func (c *AggregationController) processNextWorkItem() bool {
+func (c *AggregationController) processNextWorkItem(logger klog.Logger) bool {
 	key, quit := c.queue.Get()
 	defer c.queue.Done(key)
 	if quit {
 		return false
 	}
-	klog.V(4).Infof("OpenAPI AggregationController: Processing item %s", key)
 
-	action, err := c.syncHandler(key.(string))
+	logger.V(4).Info("OpenAPI AggregationController: Processing item", "key", key)
+
+	action, err := c.syncHandler(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("loading OpenAPI spec for %q failed with: %v", key, err))
 	}
@@ -106,7 +117,7 @@ func (c *AggregationController) processNextWorkItem() bool {
 	case syncRequeue:
 		c.queue.AddAfter(key, successfulUpdateDelay)
 	case syncRequeueRateLimited:
-		klog.Infof("OpenAPI AggregationController: action for item %s: Rate Limited Requeue.", key)
+		logger.Info("OpenAPI AggregationController: action for item: Rate Limited Requeue", "key", key)
 		c.queue.AddRateLimited(key)
 	case syncNothing:
 		c.queue.Forget(key)

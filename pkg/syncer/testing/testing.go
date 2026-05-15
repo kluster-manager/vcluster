@@ -32,13 +32,13 @@ type SyncTest struct {
 	ExpectedVirtualState  map[schema.GroupVersionKind][]runtime.Object
 	Sync                  func(ctx *synccontext.RegisterContext)
 	Compare               Compare
-	Name                  string
-	InitialPhysicalState  []runtime.Object
-	InitialVirtualState   []runtime.Object
 	AdjustConfig          func(vConfig *config.VirtualClusterConfig)
 	pClient               *testingutil.FakeIndexClient
 	vClient               *testingutil.FakeIndexClient
 	vConfig               *config.VirtualClusterConfig
+	Name                  string
+	InitialPhysicalState  []runtime.Object
+	InitialVirtualState   []runtime.Object
 }
 
 func RunTests(t *testing.T, tests []*SyncTest) {
@@ -52,7 +52,9 @@ func RunTests(t *testing.T, tests []*SyncTest) {
 
 func RunTestsWithContext(t *testing.T, createContext NewContextFunc, tests []*SyncTest) {
 	for _, test := range tests {
-		test.Run(t, createContext)
+		t.Run(test.Name, func(t *testing.T) {
+			test.Run(t, createContext)
+		})
 	}
 }
 
